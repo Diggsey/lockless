@@ -86,6 +86,8 @@ impl<T> Drop for StorageCell<T> {
     }
 }
 
+unsafe impl<T: Send> Send for StorageCell<T> {}
+
 /// Lock-free concurrent cell supporting an atomic "swap" operation
 pub struct AtomicCell<T> {
     space: StorageCell<T>,
