@@ -1,0 +1,6 @@
+[package]
+name = "lockless"
+version = "0.1.0"
+authors = ["Diggory Blake <diggsey@googlemail.com>"]
+
+[dependencies]
