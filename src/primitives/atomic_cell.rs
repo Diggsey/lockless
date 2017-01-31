@@ -18,6 +18,7 @@ unsafe fn free<T>(ptr: *mut T) {
 }
 
 // Shared part of an AtomicCell
+#[derive(Debug)]
 struct Inner<T> {
     value: AtomicPtr<T>,
 }
@@ -56,6 +57,7 @@ impl<T> Drop for Inner<T> {
 }
 
 // Manages heap space for a T - may or may not contain an initialized T
+#[derive(Debug)]
 struct StorageCell<T>(Cell<*mut T>);
 
 impl<T> StorageCell<T> {
@@ -89,6 +91,7 @@ impl<T> Drop for StorageCell<T> {
 unsafe impl<T: Send> Send for StorageCell<T> {}
 
 /// Lock-free concurrent cell supporting an atomic "swap" operation
+#[derive(Debug)]
 pub struct AtomicCell<T> {
     space: StorageCell<T>,
     inner: Arc<Inner<T>>
