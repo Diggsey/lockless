@@ -29,7 +29,7 @@ pub unsafe trait Handle: Sized + Clone {
 
     fn try_allocate_id(&self) -> Option<usize>;
     fn free_id(&self, id: usize);
-    fn with<R, F: FnOnce(&Self::Target) -> R>(&self, f: F) -> R;
+    fn with<R, F: FnOnce(&Self::Target) -> R>(&mut self, f: F) -> R;
     fn new(inner: Self::Target) -> Self;
 }
 
@@ -62,8 +62,9 @@ impl<H: Handle> IdHandle<H> {
     pub fn id(&self) -> usize {
         self.id
     }
-    pub fn with<R, F: FnOnce(&H::Target, usize) -> R>(&self, f: F) -> R {
-        self.handle.with(move |v| f(v, self.id))
+    pub fn with<R, F: FnOnce(&H::Target, usize) -> R>(&mut self, f: F) -> R {
+        let id = self.id;
+        self.handle.with(move |v| f(v, id))
     }
 }
 

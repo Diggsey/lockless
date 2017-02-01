@@ -62,7 +62,7 @@ impl<T, H: Handle<Target=AtomicCellInner<T>>> AtomicCell<H> {
         AtomicCell(IdHandle::new(&Handle::new(AtomicCellInner::new(value, max_accessors))))
     }
 
-    pub fn swap(&self, value: T) -> T {
+    pub fn swap(&mut self, value: T) -> T {
         self.0.with(move |inner, id| unsafe { inner.swap(id, value) })
     }
 }

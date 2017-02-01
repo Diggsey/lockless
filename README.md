@@ -47,6 +47,10 @@ are unbounded.
   - `AtomicCell` - an alternative to the primitive `AtomicCell` making slightly different
     trade-offs. It is slightly slower (approximately 15% slower in benchmarks), but can be
     composed into other data structures based around the `IdHandle` abstraction.
+  - `MpscQueue` - a multiple-producer, single-consumer queue. This queue does not attempt
+    to be fair, so it's possible for one producer to starve the others. The queue also
+    does not provide a mechanism to "wake up" senders/receivers when it's possible to
+    continue, and so it must be polled.
 
 
 ## Contributing

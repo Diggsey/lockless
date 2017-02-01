@@ -19,7 +19,7 @@ unsafe impl<T> Handle for BoundedHandle<T> where T: HasLen {
         self.inner.index_allocator.free(id)
     }
 
-    fn with<R, F: FnOnce(&Self::Target) -> R>(&self, f: F) -> R {
+    fn with<R, F: FnOnce(&Self::Target) -> R>(&mut self, f: F) -> R {
         f(&self.inner.inner)
     }
 

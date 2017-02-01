@@ -45,7 +45,7 @@ unsafe impl<T> Handle for ResizingHandle<T> where T: Resizable {
         self.inner.read().index_allocator.free(id)
     }
 
-    fn with<R, F: FnOnce(&Self::Target) -> R>(&self, f: F) -> R {
+    fn with<R, F: FnOnce(&Self::Target) -> R>(&mut self, f: F) -> R {
         f(&self.inner.read().inner)
     }
 
