@@ -8,7 +8,7 @@ to perform zero allocation during their primary function. Allocation is only per
 during setup, or when cloning handles to the data structures.
 
 This allocation-light design is the primary differentiator from other crates providing
-lock-free algorithms, and it means that none of the data structures provided here
+lock-free algorithms, and it means that none of the containers provided here
 are unbounded.
 
 
