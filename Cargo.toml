@@ -1,10 +1,11 @@
 [package]
 name = "lockless"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Diggory Blake <diggsey@googlemail.com>"]
 description = "Composable, lock-free, allocation-light data structures"
 repository = "https://github.com/Diggsey/lockless"
 license = "MIT OR Apache-2.0"
+categories = ["concurrency", "asynchronous"]
 
 [dependencies]
 parking_lot = "0.3.6"
