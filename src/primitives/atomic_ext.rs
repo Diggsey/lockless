@@ -6,7 +6,7 @@ use std::sync::atomic::{
 };
 
 pub trait AtomicExt {
-    type Value: Copy;
+    type Value: Copy + Eq;
 
     fn try_update<E, F: FnMut(Self::Value) -> Result<Self::Value, E>>(&self, mut f: F) -> Result<(Self::Value, Self::Value), E> {
         let mut prev = self.load_impl(Ordering::Relaxed);
@@ -15,6 +15,44 @@ pub trait AtomicExt {
                 Ok(next) => match self.compare_exchange_weak_impl(prev, next, Ordering::AcqRel, Ordering::Relaxed) {
                     Ok(_) => return Ok((prev, next)),
                     Err(new_prev) => prev = new_prev,
+                },
+                Err(e) => return Err(e)
+            }
+        }
+    }
+
+    // Updates a second atomic referred to by this one.
+    // Calling code must be careful to tag pointers to avoid the ABA problem.
+    fn try_update_indirect<
+        'a,
+        A: AtomicExt + 'a,
+        E,
+        F: FnMut(Self::Value) -> Result<&'a A, E>,
+        G: FnMut(Self::Value, A::Value) -> Result<A::Value, E>
+    >(&self, mut deref: F, mut update: G) -> Result<(Self::Value, A::Value, A::Value), E> {
+        let mut prev_ptr = self.load_impl(Ordering::Acquire);
+        loop {
+            match deref(prev_ptr) {
+                Ok(target) => {
+                    let prev = target.load_impl(Ordering::Acquire);
+                    let prev_ptr2 = self.load_impl(Ordering::Acquire);
+                            
+                    if prev_ptr2 == prev_ptr {
+                        match update(prev_ptr, prev) {
+                            Ok(next) => loop {
+                                match target.compare_exchange_weak_impl(prev, next, Ordering::AcqRel, Ordering::Relaxed) {
+                                    Ok(_) => return Ok((prev_ptr, prev, next)),
+                                    Err(new_prev) => if prev != new_prev {
+                                        prev_ptr = self.load_impl(Ordering::Acquire);
+                                        break;
+                                    }
+                                }
+                            },
+                            Err(e) => return Err(e)
+                        }
+                    } else {
+                        prev_ptr = prev_ptr2;
+                    }
                 },
                 Err(e) => return Err(e)
             }
