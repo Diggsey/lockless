@@ -30,20 +30,20 @@ pub trait AtomicExt {
         F: FnMut(Self::Value) -> Result<&'a A, E>,
         G: FnMut(Self::Value, A::Value) -> Result<A::Value, E>
     >(&self, mut deref: F, mut update: G) -> Result<(Self::Value, A::Value, A::Value), E> {
-        let mut prev_ptr = self.load_impl(Ordering::Acquire);
+        let mut prev_ptr = self.load_impl(Ordering::SeqCst);
         loop {
             match deref(prev_ptr) {
                 Ok(target) => {
-                    let prev = target.load_impl(Ordering::Acquire);
-                    let prev_ptr2 = self.load_impl(Ordering::Acquire);
+                    let prev = target.load_impl(Ordering::SeqCst);
+                    let prev_ptr2 = self.load_impl(Ordering::SeqCst);
                             
                     if prev_ptr2 == prev_ptr {
                         match update(prev_ptr, prev) {
                             Ok(next) => loop {
-                                match target.compare_exchange_weak_impl(prev, next, Ordering::AcqRel, Ordering::Relaxed) {
+                                match target.compare_exchange_weak_impl(prev, next, Ordering::SeqCst, Ordering::Relaxed) {
                                     Ok(_) => return Ok((prev_ptr, prev, next)),
                                     Err(new_prev) => if prev != new_prev {
-                                        prev_ptr = self.load_impl(Ordering::Acquire);
+                                        prev_ptr = self.load_impl(Ordering::SeqCst);
                                         break;
                                     }
                                 }

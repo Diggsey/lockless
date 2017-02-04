@@ -110,7 +110,7 @@ impl<T> MpscQueueInner<T> {
 
         loop {
             match self.tail.try_update_indirect(|tail| {
-                let head = self.head.load(Ordering::Acquire);
+                let head = self.head.load(Ordering::SeqCst);
                 // If not full
                 if (tail % size2) != (head + size) % size2 {
                     // Try updating cell at tail position
@@ -127,13 +127,13 @@ impl<T> MpscQueueInner<T> {
                 } else {
                     // Cell is full, another thread is midway through an insertion
                     // Try to assist the stalled thread
-                    let _ = self.tail.compare_exchange_weak(tail, next_cell(tail, size2), Ordering::Relaxed, Ordering::Relaxed);
+                    let _ = self.tail.compare_exchange_weak(tail, next_cell(tail, size2), Ordering::SeqCst, Ordering::Relaxed);
                     Err(true)
                 }
             }) {
                 Ok((tail, prev_cell, _)) => {
                     // Update the tail pointer if necessary
-                    while self.tail.compare_exchange_weak(tail, next_cell(tail, size2), Ordering::Relaxed, Ordering::Relaxed) == Err(tail) {}
+                    while self.tail.compare_exchange_weak(tail, next_cell(tail, size2), Ordering::SeqCst, Ordering::Relaxed) == Err(tail) {}
                     *index = prev_cell & VALUE_MASK;
                     return Ok(());
                 }
@@ -147,13 +147,15 @@ impl<T> MpscQueueInner<T> {
         let size = self.ring.len();
         let size2 = size*2;
         let head = self.head.load(Ordering::Relaxed);
-        // Read value at head
-        let cell = self.ring[head % size].load(Ordering::Acquire);
-        if cell & TAG_BIT == 0 {
+        let tail = self.tail.load(Ordering::Acquire);
+
+        // If the queue is empty
+        if head % size2 == tail % size2 {
             Err(())
         } else {
-            let result = (*(&self.values[cell & VALUE_MASK]).get()).take().expect("Tag bit must not be set for empty items");
-            self.ring[head % size].store(cell.wrapping_add(TAG_BIT), Ordering::Release);
+            let cell = self.ring[head % size].fetch_add(TAG_BIT, Ordering::AcqRel);
+            assert!(cell & TAG_BIT != 0, "Producer advanced without adding an item!");
+            let result = (*(&self.values[cell & VALUE_MASK]).get()).take().expect("Constraint was violated");
             self.head.store((head+1) % size2, Ordering::Release);
             Ok(result)
         }

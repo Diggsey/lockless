@@ -128,11 +128,11 @@ mod tests {
         use containers::mpsc_queue::{BoundedMpscQueueSender, BoundedMpscQueueReceiver};
         use std::time::Duration;
 
-        let sender_count = 2;
+        let sender_count = 20;
         let rapid_fire = 10;
         let iterations = 10;
         let mut threads = Vec::with_capacity(sender_count);
-        let mut receiver = BoundedMpscQueueReceiver::new(500, sender_count);
+        let mut receiver = BoundedMpscQueueReceiver::new(50, sender_count);
         for i in 0..sender_count {
             let mut sender = BoundedMpscQueueSender::new(&receiver);
             threads.push(thread::spawn(move || {
@@ -144,11 +144,11 @@ mod tests {
                     }
                     thread::sleep(Duration::from_millis(1));
                 }
-                panic!("Sent")
             }));
         }
         let expected = rapid_fire*iterations*sender_count;
         let mut results = vec![0; sender_count];
+
         for _ in 0..expected {
             loop {
                 if let Ok(v) = receiver.receive() {

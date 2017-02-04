@@ -41,8 +41,8 @@ impl IndexAllocator {
             loop {
                 for (index, m) in self.mask.iter().enumerate() {
                     if let Ok((prev, next)) = m.try_update(|prev| {
-                        match (!prev).trailing_zeros() {
-                            32 => Err(()),
+                        match (!prev).trailing_zeros() as usize {
+                            ::POINTER_BITS => Err(()),
                             other => Ok(prev | (1 << other))
                         }
                     }) {
