@@ -32,6 +32,7 @@ unsafe impl<T> Handle for ResizingHandle<T> where T: RaisableIdLimit {
             let mut maybe_id = guard.index_allocator.allocate();
             if prev_len == guard.index_allocator.len() || maybe_id.is_none() {
                 guard.index_allocator.resize(prev_len*2);
+                guard.inner.raise_id_limit(prev_len*2);
                 if maybe_id.is_none() {
                     maybe_id = guard.index_allocator.allocate();
                 }

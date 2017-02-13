@@ -109,7 +109,7 @@ impl<T> MpscQueueInner<T> {
 
         // Wake a task if necessary
         if let Ok(task_id) = self.parked_queue.pop() {
-            self.wake_task(0, task_id);
+            self.wake_task(0, task_id+1);
         }
     }
 
@@ -139,7 +139,7 @@ impl<T> MpscQueueInner<T> {
         }
 
         // Wake the receiver if necessary
-        self.wake_task(id, 0);
+        self.wake_task(id+1, 0);
         
         // All done
         Ok(AsyncSink::Ready)
@@ -189,7 +189,7 @@ impl<T> MpscQueueInner<T> {
 
         // Wake any waiting tasks
         while let Ok(task_id) = self.parked_queue.pop() {
-            self.wake_task(0, task_id);
+            self.wake_task(0, task_id+1);
         }
     }
 }
