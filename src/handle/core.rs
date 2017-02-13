@@ -4,8 +4,8 @@
 use primitives::index_allocator::IndexAllocator;
 
 // Implemented for data structures with a length
-pub trait HasLen {
-    fn len(&self) -> usize;
+pub trait IdLimit {
+    fn id_limit(&self) -> usize;
 }
 
 #[derive(Debug)]
@@ -14,9 +14,9 @@ pub struct HandleInner<T> {
     pub index_allocator: IndexAllocator
 }
 
-impl<T: HasLen> HandleInner<T> {
+impl<T: IdLimit> HandleInner<T> {
     pub fn new(inner: T) -> Self {
-        let len = inner.len();
+        let len = inner.id_limit();
         HandleInner {
             inner: inner,
             index_allocator: IndexAllocator::new(len)
@@ -25,11 +25,11 @@ impl<T: HasLen> HandleInner<T> {
 }
 
 pub unsafe trait Handle: Sized + Clone {
-    type Target: HasLen;
+    type Target: IdLimit;
 
     fn try_allocate_id(&self) -> Option<usize>;
     fn free_id(&self, id: usize);
-    fn with<R, F: FnOnce(&Self::Target) -> R>(&mut self, f: F) -> R;
+    fn with<R, F: FnOnce(&Self::Target) -> R>(&self, f: F) -> R;
     fn new(inner: Self::Target) -> Self;
 }
 
@@ -62,7 +62,10 @@ impl<H: Handle> IdHandle<H> {
     pub fn id(&self) -> usize {
         self.id
     }
-    pub fn with<R, F: FnOnce(&H::Target, usize) -> R>(&mut self, f: F) -> R {
+    pub fn with<R, F: FnOnce(&H::Target) -> R>(&self, f: F) -> R {
+        self.handle.with(f)
+    }
+    pub fn with_mut<R, F: FnOnce(&H::Target, usize) -> R>(&mut self, f: F) -> R {
         let id = self.id;
         self.handle.with(move |v| f(v, id))
     }

@@ -9,3 +9,4 @@ categories = ["concurrency", "asynchronous"]
 
 [dependencies]
 parking_lot = "0.3.6"
+futures = "0.1.9"

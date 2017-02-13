@@ -2,10 +2,12 @@
 extern crate test;
 
 extern crate parking_lot;
+extern crate futures;
 
 pub mod primitives;
 pub mod handle;
 pub mod containers;
+pub mod sync;
 
 #[cfg(target_pointer_width = "16")] const POINTER_BITS: usize = 16;
 #[cfg(target_pointer_width = "32")] const POINTER_BITS: usize = 32;

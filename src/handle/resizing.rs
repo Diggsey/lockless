@@ -1,11 +1,11 @@
 use std::sync::Arc;
 use parking_lot::RwLock;
 
-use super::{HandleInner, HasLen, Handle, IdHandle};
+use super::{HandleInner, IdLimit, Handle, IdHandle};
 
 // Implemented for data structures where the length can be increased
-pub trait Resizable: HasLen {
-    fn resize(&mut self, new_len: usize);
+pub trait RaisableIdLimit: IdLimit {
+    fn raise_id_limit(&mut self, new_limit: usize);
 }
 
 /// Implementation of Handle which resizes the data structure as needed
@@ -14,7 +14,7 @@ pub struct ResizingHandle<T> {
     inner: Arc<RwLock<HandleInner<T>>>
 }
 
-unsafe impl<T> Handle for ResizingHandle<T> where T: Resizable {
+unsafe impl<T> Handle for ResizingHandle<T> where T: RaisableIdLimit {
     type Target = T;
 
     fn try_allocate_id(&self) -> Option<usize> {
@@ -45,7 +45,7 @@ unsafe impl<T> Handle for ResizingHandle<T> where T: Resizable {
         self.inner.read().index_allocator.free(id)
     }
 
-    fn with<R, F: FnOnce(&Self::Target) -> R>(&mut self, f: F) -> R {
+    fn with<R, F: FnOnce(&Self::Target) -> R>(&self, f: F) -> R {
         f(&self.inner.read().inner)
     }
 

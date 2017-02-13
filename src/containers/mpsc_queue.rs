@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::cell::UnsafeCell;
 
-use handle::{HasLen, Resizable, Handle, IdHandle, ResizingHandle, BoundedHandle};
+use handle::{IdLimit, RaisableIdLimit, Handle, IdHandle, ResizingHandle, BoundedHandle};
 use primitives::atomic_ext::AtomicExt;
 
 // Pointers are only wrapped to 2*Capacity to distinguish full from empty states, so must wrap before indexing!
@@ -50,23 +50,23 @@ pub struct MpscQueueInner<T> {
 
 unsafe impl<T: Send> Sync for MpscQueueInner<T> {}
 
-impl<T> HasLen for MpscQueueInner<T> {
-    fn len(&self) -> usize {
+impl<T> IdLimit for MpscQueueInner<T> {
+    fn id_limit(&self) -> usize {
         self.indices.len()
     }
 }
 
-impl<T> Resizable for MpscQueueInner<T> {
-    fn resize(&mut self, new_len: usize) {
+impl<T> RaisableIdLimit for MpscQueueInner<T> {
+    fn raise_id_limit(&mut self, new_limit: usize) {
         let size = self.ring.len();
 
-        assert!(new_len > self.len());
-        assert!(new_len + size <= TAG_BIT, "Queue too large for system's atomic support");
+        assert!(new_limit > self.id_limit());
+        assert!(new_limit + size <= TAG_BIT, "Queue too large for system's atomic support");
 
         let mut len = self.indices.len();
-        self.values.reserve_exact(new_len + size - len);
-        self.indices.reserve_exact(new_len - len);
-        while len < new_len {
+        self.values.reserve_exact(new_limit + size - len);
+        self.indices.reserve_exact(new_limit - len);
+        while len < new_limit {
             self.values.push(UnsafeCell::new(None));
             self.indices.push(UnsafeCell::new(size + len));
             len += 1;
@@ -82,8 +82,21 @@ fn next_cell(mut index: usize, size2: usize) -> usize {
     index
 }
 
+fn wraps_around(start: usize, end: usize, size: usize) -> bool {
+    let size2 = size*2;
+    (end % size) < (start % size) || ((start + size) % size2 == (end % size2))
+}
+
+fn rotate_slice<T>(slice: &mut [T], places: usize) {
+    slice.reverse();
+    let (a, b) = slice.split_at_mut(places);
+    a.reverse();
+    b.reverse();
+}
+
 impl<T> MpscQueueInner<T> {
     pub fn new(size: usize, max_senders: usize) -> Self {
+        assert!(max_senders > 0);
         let mut result = MpscQueueInner {
             values: Vec::with_capacity(max_senders+size),
             indices: Vec::with_capacity(max_senders),
@@ -95,8 +108,34 @@ impl<T> MpscQueueInner<T> {
             result.values.push(UnsafeCell::new(None));
             result.ring.push(AtomicUsize::new(i));
         }
-        result.resize(max_senders);
+        result.raise_id_limit(max_senders);
         result
+    }
+
+    pub fn resize(&mut self, new_size: usize) {
+        let size = self.ring.len();
+        let extra = new_size - size;
+        self.ring.reserve_exact(extra);
+        self.values.reserve_exact(extra);
+        for _ in 0..extra {
+            let index = self.values.len();
+            self.values.push(UnsafeCell::new(None));
+            self.ring.push(AtomicUsize::new(index));
+        }
+
+        // If the queue wraps around the buffer, shift the elements
+        // along such that the start section of the queue is moved to the
+        // new end of the buffer.
+        let head = self.head.get_mut();
+        let tail = self.tail.get_mut();
+        if wraps_around(*head, *tail, size) {
+            rotate_slice(&mut self.ring[*head..], extra);
+            *head += extra;
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.ring.len()
     }
 
     pub unsafe fn push(&self, id: usize, value: T) -> Result<(), T> {
@@ -191,7 +230,7 @@ impl<T, H: Handle<Target=MpscQueueInner<T>>> MpscQueueSender<H> {
     }
 
     pub fn send(&mut self, value: T) -> Result<(), T> {
-        self.0.with(|inner, id| unsafe { inner.push(id, value) })
+        self.0.with_mut(|inner, id| unsafe { inner.push(id, value) })
     }
     pub fn try_clone(&self) -> Option<Self> {
         self.0.try_clone().map(MpscQueueSender)

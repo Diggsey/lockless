@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::cell::UnsafeCell;
 
-use handle::{HasLen, Resizable, Handle, IdHandle, ResizingHandle, BoundedHandle};
+use handle::{IdLimit, RaisableIdLimit, Handle, IdHandle, ResizingHandle, BoundedHandle};
 
 #[derive(Debug)]
 pub struct AtomicCellInner<T> {
@@ -12,20 +12,20 @@ pub struct AtomicCellInner<T> {
 
 unsafe impl<T: Send> Sync for AtomicCellInner<T> {}
 
-impl<T> HasLen for AtomicCellInner<T> {
-    fn len(&self) -> usize {
+impl<T> IdLimit for AtomicCellInner<T> {
+    fn id_limit(&self) -> usize {
         self.values.len()
     }
 }
 
-impl<T> Resizable for AtomicCellInner<T> {
-    fn resize(&mut self, new_len: usize) {
-        assert!(new_len > self.len());
+impl<T> RaisableIdLimit for AtomicCellInner<T> {
+    fn raise_id_limit(&mut self, new_limit: usize) {
+        assert!(new_limit > self.id_limit());
 
         let mut len = self.values.len();
-        self.values.reserve_exact(new_len + 1 - len);
-        self.indices.reserve_exact(new_len - len);
-        while len < new_len {
+        self.values.reserve_exact(new_limit + 1 - len);
+        self.indices.reserve_exact(new_limit - len);
+        while len < new_limit {
             len += 1;
             self.values.push(UnsafeCell::new(None));
             self.indices.push(UnsafeCell::new(len));
@@ -41,7 +41,7 @@ impl<T> AtomicCellInner<T> {
             current: AtomicUsize::new(0)
         };
         result.values.push(UnsafeCell::new(Some(value)));
-        result.resize(max_accessors);
+        result.raise_id_limit(max_accessors);
         result
     }
     pub unsafe fn swap(&self, id: usize, value: T) -> T {
@@ -63,7 +63,7 @@ impl<T, H: Handle<Target=AtomicCellInner<T>>> AtomicCell<H> {
     }
 
     pub fn swap(&mut self, value: T) -> T {
-        self.0.with(move |inner, id| unsafe { inner.swap(id, value) })
+        self.0.with_mut(move |inner, id| unsafe { inner.swap(id, value) })
     }
 }
 

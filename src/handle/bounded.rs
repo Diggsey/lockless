@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use super::{HandleInner, HasLen, Handle, IdHandle};
+use super::{HandleInner, IdLimit, Handle, IdHandle};
 
 /// Implementation of Handle which panics if it runs out of IDs
 #[derive(Debug)]
@@ -8,7 +8,7 @@ pub struct BoundedHandle<T> {
     inner: Arc<HandleInner<T>>
 }
 
-unsafe impl<T> Handle for BoundedHandle<T> where T: HasLen {
+unsafe impl<T> Handle for BoundedHandle<T> where T: IdLimit {
     type Target = T;
 
     fn try_allocate_id(&self) -> Option<usize> {
@@ -19,7 +19,7 @@ unsafe impl<T> Handle for BoundedHandle<T> where T: HasLen {
         self.inner.index_allocator.free(id)
     }
 
-    fn with<R, F: FnOnce(&Self::Target) -> R>(&mut self, f: F) -> R {
+    fn with<R, F: FnOnce(&Self::Target) -> R>(&self, f: F) -> R {
         f(&self.inner.inner)
     }
 
