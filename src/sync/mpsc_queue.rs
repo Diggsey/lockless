@@ -25,7 +25,9 @@ pub struct MpscQueueInner<T> {
     // Parked thread queue
     parked_queue: mpsc_queue::MpscQueueInner<usize>,
     // Buffer size
-    buffer_size: usize
+    buffer_size: usize,
+    // Sender count
+    sender_count: AtomicUsize
 }
 
 #[derive(Debug)]
@@ -68,7 +70,8 @@ impl<T> MpscQueueInner<T> {
             msg_count: AtomicUsize::new(0),
             msg_queue: mpsc_queue::MpscQueueInner::new(size + max_senders, max_senders),
             parked_queue: mpsc_queue::MpscQueueInner::new(max_senders, max_senders),
-            buffer_size: size
+            buffer_size: size,
+            sender_count: AtomicUsize::new(0)
         };
         for _ in 0..(max_senders+1) {
             result.tasks.push(None);
@@ -172,7 +175,7 @@ impl<T> MpscQueueInner<T> {
                     Err(()) => {
                         // Queue is still empty, if it's closed and there are no remaining message
                         // then we're done!
-                        if self.msg_count.load(Ordering::SeqCst) == CLOSE_FLAG {
+                        if self.msg_count.load(Ordering::SeqCst) == CLOSE_FLAG || self.sender_count.load(Ordering::SeqCst) == 0 {
                             Async::Ready(None)
                         } else {
                             Async::NotReady
@@ -190,6 +193,16 @@ impl<T> MpscQueueInner<T> {
         // Wake any waiting tasks
         while let Ok(task_id) = self.parked_queue.pop() {
             self.wake_task(0, task_id+1);
+        }
+    }
+
+    pub unsafe fn inc_sender_count(&self) {
+        self.sender_count.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub unsafe fn dec_sender_count(&self, id: usize) {
+        if self.sender_count.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.wake_task(id+1, 0);
         }
     }
 }
@@ -231,22 +244,32 @@ impl<T, H: Handle<Target=MpscQueueInner<T>>> Drop for MpscQueueReceiver<T, H> {
 pub type ResizingMpscQueueReceiver<T> = MpscQueueReceiver<T, ResizingHandle<MpscQueueInner<T>>>;
 pub type BoundedMpscQueueReceiver<T> = MpscQueueReceiver<T, BoundedHandle<MpscQueueInner<T>>>;
 
-#[derive(Debug, Clone)]
-pub struct MpscQueueSender<H: Handle>(IdHandle<H>);
+#[derive(Debug)]
+pub struct MpscQueueSender<T, H: Handle<Target=MpscQueueInner<T>>>(IdHandle<H>);
 
-impl<T, H: Handle<Target=MpscQueueInner<T>>> MpscQueueSender<H> {
+impl<T, H: Handle<Target=MpscQueueInner<T>>> MpscQueueSender<T, H> {
     pub fn new(receiver: &MpscQueueReceiver<T, H>) -> Self {
-        MpscQueueSender(IdHandle::new(&receiver.0))
+        MpscQueueSender(IdHandle::new(&receiver.0)).inc_sender_count()
     }
     pub fn try_new(receiver: &MpscQueueReceiver<T, H>) -> Option<Self> {
-        IdHandle::try_new(&receiver.0).map(MpscQueueSender)
+        IdHandle::try_new(&receiver.0).map(|inner| MpscQueueSender(inner).inc_sender_count())
     }
     pub fn try_clone(&self) -> Option<Self> {
-        self.0.try_clone().map(MpscQueueSender)
+        self.0.try_clone().map(|inner| MpscQueueSender(inner).inc_sender_count())
+    }
+    fn inc_sender_count(self) -> Self {
+        self.0.with(|inner| unsafe { inner.inc_sender_count() });
+        self
     }
 }
 
-impl<T, H: Handle<Target=MpscQueueInner<T>>> Sink for MpscQueueSender<H> {
+impl<T, H: Handle<Target=MpscQueueInner<T>>> Clone for MpscQueueSender<T, H> {
+    fn clone(&self) -> Self {
+        MpscQueueSender(self.0.clone()).inc_sender_count()
+    }
+}
+
+impl<T, H: Handle<Target=MpscQueueInner<T>>> Sink for MpscQueueSender<T, H> {
     type SinkItem = T;
     type SinkError = SendError<T>;
 
@@ -259,5 +282,12 @@ impl<T, H: Handle<Target=MpscQueueInner<T>>> Sink for MpscQueueSender<H> {
     }
 }
 
-pub type ResizingMpscQueueSender<T> = MpscQueueSender<ResizingHandle<MpscQueueInner<T>>>;
-pub type BoundedMpscQueueSender<T> = MpscQueueSender<BoundedHandle<MpscQueueInner<T>>>;
+impl<T, H: Handle<Target=MpscQueueInner<T>>> Drop for MpscQueueSender<T, H> {
+    fn drop(&mut self) {
+        // Wake up the receiver
+        self.0.with_mut(|inner, id| unsafe { inner.dec_sender_count(id) })
+    }
+}
+
+pub type ResizingMpscQueueSender<T> = MpscQueueSender<T, ResizingHandle<MpscQueueInner<T>>>;
+pub type BoundedMpscQueueSender<T> = MpscQueueSender<T, BoundedHandle<MpscQueueInner<T>>>;

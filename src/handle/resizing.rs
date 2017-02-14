@@ -55,6 +55,10 @@ unsafe impl<T> Handle for ResizingHandle<T> where T: RaisableIdLimit {
             inner: Arc::new(RwLock::new(HandleInner::new(inner)))
         }
     }
+
+    fn id_count(&self) -> usize {
+        self.inner.read().index_allocator.len()
+    }
 }
 
 impl<T> Clone for ResizingHandle<T> {

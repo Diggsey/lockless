@@ -28,6 +28,10 @@ unsafe impl<T> Handle for BoundedHandle<T> where T: IdLimit {
             inner: Arc::new(HandleInner::new(inner))
         }
     }
+
+    fn id_count(&self) -> usize {
+        self.inner.index_allocator.len()
+    }
 }
 
 impl<T> Clone for BoundedHandle<T> {

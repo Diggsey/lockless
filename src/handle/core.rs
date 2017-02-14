@@ -31,6 +31,7 @@ pub unsafe trait Handle: Sized + Clone {
     fn free_id(&self, id: usize);
     fn with<R, F: FnOnce(&Self::Target) -> R>(&self, f: F) -> R;
     fn new(inner: Self::Target) -> Self;
+    fn id_count(&self) -> usize;
 }
 
 // `ResizingHandle`s will automatically allocate themselves an ID, which
