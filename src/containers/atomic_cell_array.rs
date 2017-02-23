@@ -1,24 +1,21 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::cell::UnsafeCell;
+use std::marker::PhantomData;
 
-use handle::{IdLimit, RaisableIdLimit, Handle, IdHandle, ResizingHandle, BoundedHandle};
+use handle::{HandleInner, Handle, IdHandle, ResizingHandle, BoundedHandle, Tag0, HandleInnerBase, ContainerInner, HandleInner1, Id};
+use primitives::index_allocator::IndexAllocator;
 
 #[derive(Debug)]
-pub struct AtomicCellArrayInner<T> {
+pub struct AtomicCellArrayInner<T, Tag> {
     values: Vec<UnsafeCell<Option<T>>>,
     indices: Vec<UnsafeCell<usize>>,
-    current: Vec<AtomicUsize>
+    current: Vec<AtomicUsize>,
+    phantom: PhantomData<*mut Tag>,
 }
 
-unsafe impl<T: Send> Sync for AtomicCellArrayInner<T> {}
+unsafe impl<T: Send, Tag> Sync for AtomicCellArrayInner<T, Tag> {}
 
-impl<T> IdLimit for AtomicCellArrayInner<T> {
-    fn id_limit(&self) -> usize {
-        self.indices.len()
-    }
-}
-
-impl<T> RaisableIdLimit for AtomicCellArrayInner<T> {
+impl<T, Tag> ContainerInner<Tag> for AtomicCellArrayInner<T, Tag> {
     fn raise_id_limit(&mut self, new_limit: usize) {
         assert!(new_limit > self.id_limit());
 
@@ -30,9 +27,12 @@ impl<T> RaisableIdLimit for AtomicCellArrayInner<T> {
             self.values.push(UnsafeCell::new(None));
         }
     }
+    fn id_limit(&self) -> usize {
+        self.indices.len()
+    }
 }
 
-impl<T> AtomicCellArrayInner<T> {
+impl<T, Tag> AtomicCellArrayInner<T, Tag> {
     pub fn reserve_exact(&mut self, additional_cells: usize, additional_ids: usize) {
         self.values.reserve_exact(additional_cells + additional_ids);
         self.indices.reserve_exact(additional_ids);
@@ -59,7 +59,8 @@ impl<T> AtomicCellArrayInner<T> {
         let mut result = AtomicCellArrayInner {
             values: Vec::new(),
             indices: Vec::new(),
-            current: Vec::new()
+            current: Vec::new(),
+            phantom: PhantomData
         };
         result.reserve_exact(capacity, id_limit);
         result.raise_id_limit(id_limit);
@@ -70,7 +71,8 @@ impl<T> AtomicCellArrayInner<T> {
         Self::with_capacity(0, id_limit)
     }
     
-    pub unsafe fn swap(&self, index: usize, id: usize, value: T) -> T {
+    pub unsafe fn swap(&self, index: usize, id: Id<Tag>, value: T) -> T {
+        let id: usize = id.into();
         // Need the extra brackets to avoid compiler bug:
         // https://github.com/rust-lang/rust/issues/28935
         let ref mut idx = *(&self.indices[id]).get();
@@ -81,11 +83,11 @@ impl<T> AtomicCellArrayInner<T> {
 }
 
 #[derive(Debug, Clone)]
-pub struct AtomicCellArray<H: Handle>(IdHandle<H>);
+pub struct AtomicCellArray<H: Handle, Tag>(IdHandle<Tag, H>) where H::HandleInner: HandleInner<Tag>;
 
-impl<T, H: Handle<Target=AtomicCellArrayInner<T>>> AtomicCellArray<H> {
+impl<T, H: Handle, Tag> AtomicCellArray<H, Tag> where H::HandleInner: HandleInnerBase<ContainerInner=AtomicCellArrayInner<T, Tag>> + HandleInner<Tag> {
     pub fn new(max_accessors: usize) -> Self {
-        AtomicCellArray(IdHandle::new(&Handle::new(AtomicCellArrayInner::new(max_accessors))))
+        AtomicCellArray(IdHandle::new(&HandleInnerBase::new(AtomicCellArrayInner::new(max_accessors))))
     }
 
     pub fn swap(&mut self, index: usize, value: T) -> T {
@@ -97,5 +99,6 @@ impl<T, H: Handle<Target=AtomicCellArrayInner<T>>> AtomicCellArray<H> {
     }
 }
 
-pub type ResizingAtomicCellArray<T> = AtomicCellArray<ResizingHandle<AtomicCellArrayInner<T>>>;
-pub type BoundedAtomicCellArray<T> = AtomicCellArray<BoundedHandle<AtomicCellArrayInner<T>>>;
+type Inner<T> = HandleInner1<Tag0, IndexAllocator, AtomicCellArrayInner<T, Tag0>>;
+pub type ResizingAtomicCellArray<T> = AtomicCellArray<ResizingHandle<Inner<T>>, Tag0>;
+pub type BoundedAtomicCellArray<T> = AtomicCellArray<BoundedHandle<Inner<T>>, Tag0>;

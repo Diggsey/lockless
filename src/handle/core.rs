@@ -1,48 +1,28 @@
+use super::ids::Id;
+use super::inner::{HandleInner, HandleInnerBase};
+
 /// This encapsulates the pattern of wrapping a fixed-size lock-free data-structure inside an
 /// RwLock, and automatically resizing it when the number of concurrent handles increases.
 
-use primitives::index_allocator::IndexAllocator;
-
-// Implemented for data structures with a length
-pub trait IdLimit {
-    fn id_limit(&self) -> usize;
-}
-
-#[derive(Debug)]
-pub struct HandleInner<T> {
-    pub inner: T,
-    pub index_allocator: IndexAllocator
-}
-
-impl<T: IdLimit> HandleInner<T> {
-    pub fn new(inner: T) -> Self {
-        let len = inner.id_limit();
-        HandleInner {
-            inner: inner,
-            index_allocator: IndexAllocator::new(len)
-        }
-    }
-}
-
 pub unsafe trait Handle: Sized + Clone {
-    type Target: IdLimit;
+    type HandleInner: HandleInnerBase;
 
-    fn try_allocate_id(&self) -> Option<usize>;
-    fn free_id(&self, id: usize);
-    fn with<R, F: FnOnce(&Self::Target) -> R>(&self, f: F) -> R;
-    fn new(inner: Self::Target) -> Self;
-    fn id_count(&self) -> usize;
+    fn try_allocate_id<Tag>(&self) -> Option<Id<Tag>> where Self::HandleInner: HandleInner<Tag>;
+    fn free_id<Tag>(&self, id: Id<Tag>) where Self::HandleInner: HandleInner<Tag>;
+    fn with<R, F: FnOnce(&<Self::HandleInner as HandleInnerBase>::ContainerInner) -> R>(&self, f: F) -> R;
+    fn new(inner: Self::HandleInner) -> Self;
+    fn id_limit<Tag>(&self) -> usize where Self::HandleInner: HandleInner<Tag>;
 }
 
 // `ResizingHandle`s will automatically allocate themselves an ID, which
 // may require resizing the data structure.
 #[derive(Debug)]
-pub struct IdHandle<H: Handle> {
-    id: usize,
+pub struct IdHandle<Tag, H: Handle> where H::HandleInner: HandleInner<Tag> {
+    id: Id<Tag>,
     handle: H
 }
 
-impl<H: Handle> IdHandle<H> {
+impl<Tag, H: Handle> IdHandle<Tag, H> where H::HandleInner: HandleInner<Tag> {
     pub fn try_clone(&self) -> Option<Self> {
         Self::try_new(&self.handle)
     }
@@ -60,25 +40,25 @@ impl<H: Handle> IdHandle<H> {
             None
         }
     }
-    pub fn id(&self) -> usize {
+    pub fn id(&self) -> Id<Tag> {
         self.id
     }
-    pub fn with<R, F: FnOnce(&H::Target) -> R>(&self, f: F) -> R {
+    pub fn with<R, F: FnOnce(&<H::HandleInner as HandleInnerBase>::ContainerInner) -> R>(&self, f: F) -> R {
         self.handle.with(f)
     }
-    pub fn with_mut<R, F: FnOnce(&H::Target, usize) -> R>(&mut self, f: F) -> R {
+    pub fn with_mut<R, F: FnOnce(&<H::HandleInner as HandleInnerBase>::ContainerInner, Id<Tag>) -> R>(&mut self, f: F) -> R {
         let id = self.id;
         self.handle.with(move |v| f(v, id))
     }
 }
 
-impl<H: Handle> Clone for IdHandle<H> {
+impl<Tag, H: Handle> Clone for IdHandle<Tag, H> where H::HandleInner: HandleInner<Tag> {
     fn clone(&self) -> Self {
         Self::new(&self.handle)
     }
 }
 
-impl<H: Handle> Drop for IdHandle<H> {
+impl<Tag, H: Handle> Drop for IdHandle<Tag, H> where H::HandleInner: HandleInner<Tag> {
     fn drop(&mut self) {
         self.handle.free_id(self.id)
     }

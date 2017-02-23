@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use futures::task::{self, Task};
 use futures::{StartSend, AsyncSink, Async, Sink, Stream, Poll};
 
-use handle::{IdLimit, RaisableIdLimit, Handle, IdHandle, ResizingHandle, BoundedHandle};
+use handle::{Handle, IdHandle, ResizingHandle, BoundedHandle};
 use primitives::atomic_ext::AtomicExt;
 use containers::atomic_cell_array::AtomicCellArrayInner;
 use containers::mpsc_queue;
@@ -208,9 +208,9 @@ impl<T> MpscQueueInner<T> {
 }
 
 #[derive(Debug)]
-pub struct MpscQueueReceiver<T, H: Handle<Target=MpscQueueInner<T>>>(H);
+pub struct MpscQueueReceiver<T, H: Handle<HandleInner=MpscQueueInner<T>>>(H);
 
-impl<T, H: Handle<Target=MpscQueueInner<T>>> MpscQueueReceiver<T, H> {
+impl<T, H: Handle<HandleInner=MpscQueueInner<T>>> MpscQueueReceiver<T, H> {
     pub fn new(size: usize, max_senders: usize) -> Self {
         MpscQueueReceiver(Handle::new(MpscQueueInner::new(size, max_senders)))
     }
@@ -221,7 +221,7 @@ impl<T, H: Handle<Target=MpscQueueInner<T>>> MpscQueueReceiver<T, H> {
     }
 }
 
-impl<T, H: Handle<Target=MpscQueueInner<T>>> Stream for MpscQueueReceiver<T, H> {
+impl<T, H: Handle<HandleInner=MpscQueueInner<T>>> Stream for MpscQueueReceiver<T, H> {
     type Item = T;
     type Error = ();
 
@@ -231,7 +231,7 @@ impl<T, H: Handle<Target=MpscQueueInner<T>>> Stream for MpscQueueReceiver<T, H> 
     }
 }
 
-impl<T, H: Handle<Target=MpscQueueInner<T>>> Drop for MpscQueueReceiver<T, H> {
+impl<T, H: Handle<HandleInner=MpscQueueInner<T>>> Drop for MpscQueueReceiver<T, H> {
     fn drop(&mut self) {
         // Drain the channel of all pending messages
         self.0.with(|inner| unsafe {
@@ -244,10 +244,13 @@ impl<T, H: Handle<Target=MpscQueueInner<T>>> Drop for MpscQueueReceiver<T, H> {
 pub type ResizingMpscQueueReceiver<T> = MpscQueueReceiver<T, ResizingHandle<MpscQueueInner<T>>>;
 pub type BoundedMpscQueueReceiver<T> = MpscQueueReceiver<T, BoundedHandle<MpscQueueInner<T>>>;
 
-#[derive(Debug)]
-pub struct MpscQueueSender<T, H: Handle<Target=MpscQueueInner<T>>>(IdHandle<H>);
+#[derive(Debug, Clone)]
+pub struct SenderTag;
 
-impl<T, H: Handle<Target=MpscQueueInner<T>>> MpscQueueSender<T, H> {
+#[derive(Debug)]
+pub struct MpscQueueSender<T, H: Handle<HandleInner=MpscQueueInner<T>>>(IdHandle<SenderTag, H>);
+
+impl<T, H: Handle<HandleInner=MpscQueueInner<T>>> MpscQueueSender<T, H> {
     pub fn new(receiver: &MpscQueueReceiver<T, H>) -> Self {
         MpscQueueSender(IdHandle::new(&receiver.0)).inc_sender_count()
     }
@@ -263,13 +266,13 @@ impl<T, H: Handle<Target=MpscQueueInner<T>>> MpscQueueSender<T, H> {
     }
 }
 
-impl<T, H: Handle<Target=MpscQueueInner<T>>> Clone for MpscQueueSender<T, H> {
+impl<T, H: Handle<HandleInner=MpscQueueInner<T>>> Clone for MpscQueueSender<T, H> {
     fn clone(&self) -> Self {
         MpscQueueSender(self.0.clone()).inc_sender_count()
     }
 }
 
-impl<T, H: Handle<Target=MpscQueueInner<T>>> Sink for MpscQueueSender<T, H> {
+impl<T, H: Handle<HandleInner=MpscQueueInner<T>>> Sink for MpscQueueSender<T, H> {
     type SinkItem = T;
     type SinkError = SendError<T>;
 
@@ -282,7 +285,7 @@ impl<T, H: Handle<Target=MpscQueueInner<T>>> Sink for MpscQueueSender<T, H> {
     }
 }
 
-impl<T, H: Handle<Target=MpscQueueInner<T>>> Drop for MpscQueueSender<T, H> {
+impl<T, H: Handle<HandleInner=MpscQueueInner<T>>> Drop for MpscQueueSender<T, H> {
     fn drop(&mut self) {
         // Wake up the receiver
         self.0.with_mut(|inner, id| unsafe { inner.dec_sender_count(id) })
