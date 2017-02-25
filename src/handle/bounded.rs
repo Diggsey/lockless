@@ -1,40 +1,40 @@
 use std::sync::Arc;
 
-use super::{HandleInner, IdLimit, Handle, IdHandle};
+use super::{HandleInnerBase, HandleInner, Handle, IdHandle, Id, IdAllocator};
 
 /// Implementation of Handle which panics if it runs out of IDs
 #[derive(Debug)]
-pub struct BoundedHandle<T> {
-    inner: Arc<HandleInner<T>>
+pub struct BoundedHandle<H> {
+    inner: Arc<H>
 }
 
-unsafe impl<T> Handle for BoundedHandle<T> where T: IdLimit {
-    type Target = T;
+unsafe impl<H: HandleInnerBase> Handle for BoundedHandle<H> {
+    type HandleInner = H;
 
-    fn try_allocate_id(&self) -> Option<usize> {
-        self.inner.index_allocator.allocate()
+    fn try_allocate_id<Tag>(&self) -> Option<Id<Tag>> where Self::HandleInner: HandleInner<Tag> {
+        self.inner.id_allocator().try_allocate_id()
     }
 
-    fn free_id(&self, id: usize) {
-        self.inner.index_allocator.free(id)
+    fn free_id<Tag>(&self, id: Id<Tag>) where Self::HandleInner: HandleInner<Tag> {
+        self.inner.id_allocator().free_id(id)
     }
 
-    fn with<R, F: FnOnce(&Self::Target) -> R>(&self, f: F) -> R {
-        f(&self.inner.inner)
+    fn with<R, F: FnOnce(&<Self::HandleInner as HandleInnerBase>::ContainerInner) -> R>(&self, f: F) -> R {
+        f(self.inner.inner())
     }
 
-    fn new(inner: T) -> Self {
+    fn new(inner: Self::HandleInner) -> Self {
         BoundedHandle {
-            inner: Arc::new(HandleInner::new(inner))
+            inner: Arc::new(inner)
         }
     }
 
-    fn id_count(&self) -> usize {
-        self.inner.index_allocator.len()
+    fn id_limit<Tag>(&self) -> usize where Self::HandleInner: HandleInner<Tag> {
+        self.inner.id_allocator().id_limit()
     }
 }
 
-impl<T> Clone for BoundedHandle<T> {
+impl<H> Clone for BoundedHandle<H> {
     fn clone(&self) -> Self {
         BoundedHandle {
             inner: self.inner.clone()
@@ -43,4 +43,4 @@ impl<T> Clone for BoundedHandle<T> {
 }
 
 
-pub type BoundedIdHandle<T> = IdHandle<BoundedHandle<T>>;
+pub type BoundedIdHandle<Tag, H> = IdHandle<Tag, BoundedHandle<H>>;

@@ -28,7 +28,7 @@ impl IndexAllocator {
         result.resize(len);
         result
     }
-    pub fn allocate(&self) -> Option<usize> {
+    pub fn try_allocate(&self) -> Option<usize> {
         let word_bits = word_bits();
         // If we can reserve space
         if self.used.try_update(|prev| {

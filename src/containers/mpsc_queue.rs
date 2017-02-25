@@ -1,8 +1,11 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::cell::UnsafeCell;
+use std::marker::PhantomData;
 
-use handle::{IdLimit, RaisableIdLimit, Handle, IdHandle, ResizingHandle, BoundedHandle};
+use handle::{HandleInner, Handle, IdHandle, ResizingHandle, BoundedHandle, ContainerInner, HandleInnerBase, Tag0, HandleInner1, Id};
 use primitives::atomic_ext::AtomicExt;
+use primitives::index_allocator::IndexAllocator;
+use primitives::invariant::Invariant;
 
 // Pointers are only wrapped to 2*Capacity to distinguish full from empty states, so must wrap before indexing!
 //  ___________________
@@ -33,7 +36,7 @@ const TAG_BIT: usize = 1 << (::POINTER_BITS - TAG_BITS);
 const WRAP_THRESHOLD: usize = !0 ^ (!0 >> 1);
 
 #[derive(Debug)]
-pub struct MpscQueueInner<T> {
+pub struct MpscQueueInner<T, SenderTag> {
     // All of the actual values are stored here
     values: Vec<UnsafeCell<Option<T>>>,
     // Mapping from sender ID to an index into the values array
@@ -46,17 +49,12 @@ pub struct MpscQueueInner<T> {
     // Pair of pointers into the ring buffer
     head: AtomicUsize,
     tail: AtomicUsize,
+    phantom: Invariant<SenderTag>,
 }
 
-unsafe impl<T: Send> Sync for MpscQueueInner<T> {}
+unsafe impl<T: Send, SenderTag> Sync for MpscQueueInner<T, SenderTag> {}
 
-impl<T> IdLimit for MpscQueueInner<T> {
-    fn id_limit(&self) -> usize {
-        self.indices.len()
-    }
-}
-
-impl<T> RaisableIdLimit for MpscQueueInner<T> {
+impl<T, SenderTag> ContainerInner<SenderTag> for MpscQueueInner<T, SenderTag> {
     fn raise_id_limit(&mut self, new_limit: usize) {
         let size = self.ring.len();
 
@@ -71,6 +69,10 @@ impl<T> RaisableIdLimit for MpscQueueInner<T> {
             self.indices.push(UnsafeCell::new(size + len));
             len += 1;
         }
+    }
+
+    fn id_limit(&self) -> usize {
+        self.indices.len()
     }
 }
 
@@ -94,7 +96,7 @@ fn rotate_slice<T>(slice: &mut [T], places: usize) {
     b.reverse();
 }
 
-impl<T> MpscQueueInner<T> {
+impl<T, SenderTag> MpscQueueInner<T, SenderTag> {
     pub fn new(size: usize, max_senders: usize) -> Self {
         assert!(max_senders > 0);
         let mut result = MpscQueueInner {
@@ -102,7 +104,8 @@ impl<T> MpscQueueInner<T> {
             indices: Vec::with_capacity(max_senders),
             ring: Vec::with_capacity(size),
             head: AtomicUsize::new(0),
-            tail: AtomicUsize::new(0)
+            tail: AtomicUsize::new(0),
+            phantom: PhantomData
         };
         for i in 0..size {
             result.values.push(UnsafeCell::new(None));
@@ -138,7 +141,8 @@ impl<T> MpscQueueInner<T> {
         self.ring.len()
     }
 
-    pub unsafe fn push(&self, id: usize, value: T) -> Result<(), T> {
+    pub unsafe fn push(&self, id: Id<SenderTag>, value: T) -> Result<(), T> {
+        let id: usize = id.into();
         let size = self.ring.len();
         let size2 = size*2;
 
@@ -204,9 +208,9 @@ impl<T> MpscQueueInner<T> {
 #[derive(Debug)]
 pub struct MpscQueueReceiver<H: Handle>(H);
 
-impl<T, H: Handle<Target=MpscQueueInner<T>>> MpscQueueReceiver<H> {
+impl<T, H: Handle, Tag> MpscQueueReceiver<H> where H::HandleInner: HandleInnerBase<ContainerInner=MpscQueueInner<T, Tag>> {
     pub fn new(size: usize, max_senders: usize) -> Self {
-        MpscQueueReceiver(Handle::new(MpscQueueInner::new(size, max_senders)))
+        MpscQueueReceiver(HandleInnerBase::new(MpscQueueInner::new(size, max_senders)))
     }
 
     pub fn receive(&mut self) -> Result<T, ()> {
@@ -215,13 +219,15 @@ impl<T, H: Handle<Target=MpscQueueInner<T>>> MpscQueueReceiver<H> {
     }
 }
 
-pub type ResizingMpscQueueReceiver<T> = MpscQueueReceiver<ResizingHandle<MpscQueueInner<T>>>;
-pub type BoundedMpscQueueReceiver<T> = MpscQueueReceiver<BoundedHandle<MpscQueueInner<T>>>;
+type SenderTag = Tag0;
+type Inner<T> = HandleInner1<SenderTag, IndexAllocator, MpscQueueInner<T, SenderTag>>;
+pub type ResizingMpscQueueReceiver<T> = MpscQueueReceiver<ResizingHandle<Inner<T>>>;
+pub type BoundedMpscQueueReceiver<T> = MpscQueueReceiver<BoundedHandle<Inner<T>>>;
 
-#[derive(Debug, Clone)]
-pub struct MpscQueueSender<H: Handle>(IdHandle<H>);
+#[derive(Debug)]
+pub struct MpscQueueSender<H: Handle, SenderTag>(IdHandle<SenderTag, H>) where H::HandleInner: HandleInner<SenderTag>;
 
-impl<T, H: Handle<Target=MpscQueueInner<T>>> MpscQueueSender<H> {
+impl<T, H: Handle, SenderTag> MpscQueueSender<H, SenderTag> where H::HandleInner: HandleInnerBase<ContainerInner=MpscQueueInner<T, SenderTag>> + HandleInner<SenderTag> {
     pub fn new(receiver: &MpscQueueReceiver<H>) -> Self {
         MpscQueueSender(IdHandle::new(&receiver.0))
     }
@@ -237,5 +243,11 @@ impl<T, H: Handle<Target=MpscQueueInner<T>>> MpscQueueSender<H> {
     }
 }
 
-pub type ResizingMpscQueueSender<T> = MpscQueueSender<ResizingHandle<MpscQueueInner<T>>>;
-pub type BoundedMpscQueueSender<T> = MpscQueueSender<BoundedHandle<MpscQueueInner<T>>>;
+impl<H: Handle, SenderTag> Clone for MpscQueueSender<H, SenderTag> where H::HandleInner: HandleInner<SenderTag> {
+    fn clone(&self) -> Self {
+        MpscQueueSender(self.0.clone())
+    }
+}
+
+pub type ResizingMpscQueueSender<T> = MpscQueueSender<ResizingHandle<Inner<T>>, SenderTag>;
+pub type BoundedMpscQueueSender<T> = MpscQueueSender<BoundedHandle<Inner<T>>, SenderTag>;
