@@ -4,13 +4,14 @@ use std::marker::PhantomData;
 
 use handle::{HandleInner, Handle, IdHandle, ResizingHandle, BoundedHandle, Tag0, HandleInnerBase, ContainerInner, HandleInner1, Id};
 use primitives::index_allocator::IndexAllocator;
+use primitives::invariant::Invariant;
 
 #[derive(Debug)]
 pub struct AtomicCellArrayInner<T, Tag> {
     values: Vec<UnsafeCell<Option<T>>>,
     indices: Vec<UnsafeCell<usize>>,
     current: Vec<AtomicUsize>,
-    phantom: PhantomData<*mut Tag>,
+    phantom: Invariant<Tag>,
 }
 
 unsafe impl<T: Send, Tag> Sync for AtomicCellArrayInner<T, Tag> {}
@@ -82,7 +83,7 @@ impl<T, Tag> AtomicCellArrayInner<T, Tag> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct AtomicCellArray<H: Handle, Tag>(IdHandle<Tag, H>) where H::HandleInner: HandleInner<Tag>;
 
 impl<T, H: Handle, Tag> AtomicCellArray<H, Tag> where H::HandleInner: HandleInnerBase<ContainerInner=AtomicCellArrayInner<T, Tag>> + HandleInner<Tag> {
@@ -96,6 +97,12 @@ impl<T, H: Handle, Tag> AtomicCellArray<H, Tag> where H::HandleInner: HandleInne
 
     pub fn len(&self) -> usize {
         self.0.with(|inner| inner.current.len())
+    }
+}
+
+impl<H: Handle, Tag> Clone for AtomicCellArray<H, Tag> where H::HandleInner: HandleInner<Tag> {
+    fn clone(&self) -> Self {
+        AtomicCellArray(self.0.clone())
     }
 }
 

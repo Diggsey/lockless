@@ -5,6 +5,7 @@ use std::marker::PhantomData;
 use handle::{HandleInner, Handle, IdHandle, ResizingHandle, BoundedHandle, ContainerInner, HandleInnerBase, Tag0, HandleInner1, Id};
 use primitives::atomic_ext::AtomicExt;
 use primitives::index_allocator::IndexAllocator;
+use primitives::invariant::Invariant;
 
 // Pointers are only wrapped to 2*Capacity to distinguish full from empty states, so must wrap before indexing!
 //  ___________________
@@ -48,7 +49,7 @@ pub struct MpscQueueInner<T, SenderTag> {
     // Pair of pointers into the ring buffer
     head: AtomicUsize,
     tail: AtomicUsize,
-    phantom: PhantomData<*mut SenderTag>,
+    phantom: Invariant<SenderTag>,
 }
 
 unsafe impl<T: Send, SenderTag> Sync for MpscQueueInner<T, SenderTag> {}
@@ -223,7 +224,7 @@ type Inner<T> = HandleInner1<SenderTag, IndexAllocator, MpscQueueInner<T, Sender
 pub type ResizingMpscQueueReceiver<T> = MpscQueueReceiver<ResizingHandle<Inner<T>>>;
 pub type BoundedMpscQueueReceiver<T> = MpscQueueReceiver<BoundedHandle<Inner<T>>>;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct MpscQueueSender<H: Handle, SenderTag>(IdHandle<SenderTag, H>) where H::HandleInner: HandleInner<SenderTag>;
 
 impl<T, H: Handle, SenderTag> MpscQueueSender<H, SenderTag> where H::HandleInner: HandleInnerBase<ContainerInner=MpscQueueInner<T, SenderTag>> + HandleInner<SenderTag> {
@@ -239,6 +240,12 @@ impl<T, H: Handle, SenderTag> MpscQueueSender<H, SenderTag> where H::HandleInner
     }
     pub fn try_clone(&self) -> Option<Self> {
         self.0.try_clone().map(MpscQueueSender)
+    }
+}
+
+impl<H: Handle, SenderTag> Clone for MpscQueueSender<H, SenderTag> where H::HandleInner: HandleInner<SenderTag> {
+    fn clone(&self) -> Self {
+        MpscQueueSender(self.0.clone())
     }
 }
 

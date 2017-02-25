@@ -1,9 +1,10 @@
-
-use primitives::index_allocator::IndexAllocator;
 use std::marker::PhantomData;
 
+use primitives::invariant::Invariant;
+use primitives::index_allocator::IndexAllocator;
+
 #[derive(Debug)]
-pub struct Id<Tag>(usize, PhantomData<*mut Tag>);
+pub struct Id<Tag>(usize, Invariant<Tag>);
 
 impl<Tag> Copy for Id<Tag> {}
 impl<Tag> Clone for Id<Tag> {

@@ -2,8 +2,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use futures::task::{self, Task};
 use futures::{StartSend, AsyncSink, Async, Sink, Stream, Poll};
 
-use handle::{Handle, IdHandle, ResizingHandle, BoundedHandle};
+use handle::{Handle, IdHandle, ResizingHandle, BoundedHandle, ContainerInner, Id, HandleInnerBase, HandleInner1, Tag0, HandleInner};
 use primitives::atomic_ext::AtomicExt;
+use primitives::index_allocator::IndexAllocator;
+use primitives::invariant::Invariant;
 use containers::atomic_cell_array::AtomicCellArrayInner;
 use containers::mpsc_queue;
 
@@ -11,19 +13,34 @@ use containers::mpsc_queue;
 const CLOSE_FLAG: usize = !0 ^ (!0 >> 1);
 const MSG_COUNT_MASK: usize = !CLOSE_FLAG;
 
+// A sender ID is converted to an accessor ID by adding 1
+#[derive(Debug, Copy, Clone)]
+struct AccessorTag<SenderTag>(Invariant<SenderTag>);
+
+impl<SenderTag> From<Id<SenderTag>> for Id<AccessorTag<SenderTag>> {
+    fn from(id: Id<SenderTag>) -> Self {
+        (Into::<usize>::into(id)+1).into()
+    }
+}
+
+// The receiver ID is always 0
+fn receiver_id<SenderTag>() -> Id<AccessorTag<SenderTag>> {
+    0.into()
+}
+
 #[derive(Debug)]
-pub struct MpscQueueInner<T> {
+pub struct MpscQueueInner<T, SenderTag> {
     // Stores the tasks of all senders and the receiver
     // Index 0 contains the receiver task
     // Index 1..(n+1) contains tasks for senders 0..n
-    tasks: AtomicCellArrayInner<Option<Task>>,
+    tasks: AtomicCellArrayInner<Option<Task>, AccessorTag<SenderTag>>,
     // Stores the message count in the low bits
     // If the high bit is set, the queue is closed
     msg_count: AtomicUsize,
     // Message queue
-    msg_queue: mpsc_queue::MpscQueueInner<T>,
+    msg_queue: mpsc_queue::MpscQueueInner<T, SenderTag>,
     // Parked thread queue
-    parked_queue: mpsc_queue::MpscQueueInner<usize>,
+    parked_queue: mpsc_queue::MpscQueueInner<Id<SenderTag>, SenderTag>,
     // Buffer size
     buffer_size: usize,
     // Sender count
@@ -33,13 +50,11 @@ pub struct MpscQueueInner<T> {
 #[derive(Debug)]
 pub struct SendError<T>(T);
 
-impl<T> IdLimit for MpscQueueInner<T> {
+impl<T> ContainerInner<SenderTag> for MpscQueueInner<T, SenderTag> {
     fn id_limit(&self) -> usize {
         self.msg_queue.id_limit()
     }
-}
 
-impl<T> RaisableIdLimit for MpscQueueInner<T> {
     fn raise_id_limit(&mut self, new_limit: usize) {
         let old_limit = self.id_limit();
         assert!(new_limit > old_limit);
@@ -62,7 +77,7 @@ impl<T> RaisableIdLimit for MpscQueueInner<T> {
     }
 }
 
-impl<T> MpscQueueInner<T> {
+impl<T, SenderTag> MpscQueueInner<T, SenderTag> {
     pub fn new(size: usize, max_senders: usize) -> Self {
         assert!(max_senders > 0);
         let mut result = MpscQueueInner {
@@ -79,7 +94,7 @@ impl<T> MpscQueueInner<T> {
         result
     }
 
-    unsafe fn inc_msg_count(&self, id: usize) -> Result<bool, ()> {
+    unsafe fn inc_msg_count(&self, id: Id<SenderTag>) -> Result<bool, ()> {
         // Try increasing the message count
         match self.msg_count.try_update(|prev| {
             if prev & CLOSE_FLAG == 0 {
@@ -112,27 +127,38 @@ impl<T> MpscQueueInner<T> {
 
         // Wake a task if necessary
         if let Ok(task_id) = self.parked_queue.pop() {
-            self.wake_task(0, task_id+1);
+            self.wake_task(receiver_id(), task_id.into());
         }
     }
 
-    unsafe fn wake_task(&self, id: usize, task_id: usize) {
-        if let Some(task) = self.tasks.swap(task_id, id, None) {
+    // Wake another parked task
+    unsafe fn wake_task(&self, id: Id<AccessorTag<SenderTag>>, task_id: Id<AccessorTag<SenderTag>>) {
+        if let Some(task) = self.tasks.swap(task_id.into(), id, None) {
             task.unpark();
         }
     }
 
-    pub unsafe fn push(&self, id: usize, mut value: T) -> StartSend<T, SendError<T>> {
+    // Returns true if was already parked
+    unsafe fn park_self(&self, id: Id<AccessorTag<SenderTag>>) -> bool {
+        self.tasks.swap(id.into(), id, Some(task::park())).is_some()
+    }
+
+    // Undo a previous `park_self` operation
+    unsafe fn unpark_self(&self, id: Id<AccessorTag<SenderTag>>) {
+        self.tasks.swap(id.into(), id, None);
+    }
+
+    pub unsafe fn push(&self, id: Id<SenderTag>, mut value: T) -> StartSend<T, SendError<T>> {
         // Check if we're currently parked, while updating our task handle at the same time
         // ~fancy~ :P
-        if let Some(_) = self.tasks.swap(id+1, id+1, Some(task::park())) {
+        if self.park_self(id.into()) {
             return Ok(AsyncSink::NotReady(value));
         }
 
         // Increasing the message count may fail if we've been closed
         match self.inc_msg_count(id) {
             Ok(true) => {},
-            Ok(false) => { self.tasks.swap(id+1, id+1, None); },
+            Ok(false) => { self.unpark_self(id.into()); },
             Err(()) => return Err(SendError(value))
         }
 
@@ -142,7 +168,7 @@ impl<T> MpscQueueInner<T> {
         }
 
         // Wake the receiver if necessary
-        self.wake_task(id+1, 0);
+        self.wake_task(id.into(), receiver_id());
         
         // All done
         Ok(AsyncSink::Ready)
@@ -162,13 +188,13 @@ impl<T> MpscQueueInner<T> {
             },
             Err(()) => {
                 // Park ourselves
-                self.tasks.swap(0, 0, Some(task::park()));
+                self.park_self(receiver_id());
                 // Check that queue is still empty
                 match self.msg_queue.pop() {
                     Ok(value) => {
                         // Queue became non-empty
                         // Take an item and return
-                        self.tasks.swap(0, 0, None);
+                        self.unpark_self(receiver_id());
                         self.dec_msg_count();
                         Async::Ready(Some(value))
                     },
@@ -192,7 +218,7 @@ impl<T> MpscQueueInner<T> {
 
         // Wake any waiting tasks
         while let Ok(task_id) = self.parked_queue.pop() {
-            self.wake_task(0, task_id+1);
+            self.wake_task(receiver_id(), task_id.into());
         }
     }
 
@@ -200,19 +226,19 @@ impl<T> MpscQueueInner<T> {
         self.sender_count.fetch_add(1, Ordering::AcqRel);
     }
 
-    pub unsafe fn dec_sender_count(&self, id: usize) {
+    pub unsafe fn dec_sender_count(&self, id: Id<SenderTag>) {
         if self.sender_count.fetch_sub(1, Ordering::AcqRel) == 1 {
-            self.wake_task(id+1, 0);
+            self.wake_task(id.into(), receiver_id());
         }
     }
 }
 
 #[derive(Debug)]
-pub struct MpscQueueReceiver<T, H: Handle<HandleInner=MpscQueueInner<T>>>(H);
+pub struct MpscQueueReceiver<T, H: Handle, SenderTag>(H) where H::HandleInner: HandleInnerBase<ContainerInner=MpscQueueInner<T, SenderTag>>;
 
-impl<T, H: Handle<HandleInner=MpscQueueInner<T>>> MpscQueueReceiver<T, H> {
+impl<T, H: Handle, SenderTag> MpscQueueReceiver<T, H, SenderTag> where H::HandleInner: HandleInnerBase<ContainerInner=MpscQueueInner<T, SenderTag>> {
     pub fn new(size: usize, max_senders: usize) -> Self {
-        MpscQueueReceiver(Handle::new(MpscQueueInner::new(size, max_senders)))
+        MpscQueueReceiver(HandleInnerBase::new(MpscQueueInner::new(size, max_senders)))
     }
 
     pub fn close(&mut self) {
@@ -221,7 +247,7 @@ impl<T, H: Handle<HandleInner=MpscQueueInner<T>>> MpscQueueReceiver<T, H> {
     }
 }
 
-impl<T, H: Handle<HandleInner=MpscQueueInner<T>>> Stream for MpscQueueReceiver<T, H> {
+impl<T, H: Handle, SenderTag> Stream for MpscQueueReceiver<T, H, SenderTag> where H::HandleInner: HandleInnerBase<ContainerInner=MpscQueueInner<T, SenderTag>> {
     type Item = T;
     type Error = ();
 
@@ -231,7 +257,7 @@ impl<T, H: Handle<HandleInner=MpscQueueInner<T>>> Stream for MpscQueueReceiver<T
     }
 }
 
-impl<T, H: Handle<HandleInner=MpscQueueInner<T>>> Drop for MpscQueueReceiver<T, H> {
+impl<T, H: Handle, SenderTag> Drop for MpscQueueReceiver<T, H, SenderTag> where H::HandleInner: HandleInnerBase<ContainerInner=MpscQueueInner<T, SenderTag>> {
     fn drop(&mut self) {
         // Drain the channel of all pending messages
         self.0.with(|inner| unsafe {
@@ -241,20 +267,19 @@ impl<T, H: Handle<HandleInner=MpscQueueInner<T>>> Drop for MpscQueueReceiver<T, 
     }
 }
 
-pub type ResizingMpscQueueReceiver<T> = MpscQueueReceiver<T, ResizingHandle<MpscQueueInner<T>>>;
-pub type BoundedMpscQueueReceiver<T> = MpscQueueReceiver<T, BoundedHandle<MpscQueueInner<T>>>;
-
-#[derive(Debug, Clone)]
-pub struct SenderTag;
+type SenderTag = Tag0;
+type Inner<T> = HandleInner1<SenderTag, IndexAllocator, MpscQueueInner<T, SenderTag>>;
+pub type ResizingMpscQueueReceiver<T> = MpscQueueReceiver<T, ResizingHandle<Inner<T>>, SenderTag>;
+pub type BoundedMpscQueueReceiver<T> = MpscQueueReceiver<T, BoundedHandle<Inner<T>>, SenderTag>;
 
 #[derive(Debug)]
-pub struct MpscQueueSender<T, H: Handle<HandleInner=MpscQueueInner<T>>>(IdHandle<SenderTag, H>);
+pub struct MpscQueueSender<T, H: Handle, SenderTag>(IdHandle<SenderTag, H>) where H::HandleInner: HandleInnerBase<ContainerInner=MpscQueueInner<T, SenderTag>> + HandleInner<SenderTag>;
 
-impl<T, H: Handle<HandleInner=MpscQueueInner<T>>> MpscQueueSender<T, H> {
-    pub fn new(receiver: &MpscQueueReceiver<T, H>) -> Self {
+impl<T, H: Handle, SenderTag> MpscQueueSender<T, H, SenderTag> where H::HandleInner: HandleInnerBase<ContainerInner=MpscQueueInner<T, SenderTag>> + HandleInner<SenderTag> {
+    pub fn new(receiver: &MpscQueueReceiver<T, H, SenderTag>) -> Self {
         MpscQueueSender(IdHandle::new(&receiver.0)).inc_sender_count()
     }
-    pub fn try_new(receiver: &MpscQueueReceiver<T, H>) -> Option<Self> {
+    pub fn try_new(receiver: &MpscQueueReceiver<T, H, SenderTag>) -> Option<Self> {
         IdHandle::try_new(&receiver.0).map(|inner| MpscQueueSender(inner).inc_sender_count())
     }
     pub fn try_clone(&self) -> Option<Self> {
@@ -266,13 +291,13 @@ impl<T, H: Handle<HandleInner=MpscQueueInner<T>>> MpscQueueSender<T, H> {
     }
 }
 
-impl<T, H: Handle<HandleInner=MpscQueueInner<T>>> Clone for MpscQueueSender<T, H> {
+impl<T, H: Handle, SenderTag> Clone for MpscQueueSender<T, H, SenderTag> where H::HandleInner: HandleInnerBase<ContainerInner=MpscQueueInner<T, SenderTag>> + HandleInner<SenderTag> {
     fn clone(&self) -> Self {
         MpscQueueSender(self.0.clone()).inc_sender_count()
     }
 }
 
-impl<T, H: Handle<HandleInner=MpscQueueInner<T>>> Sink for MpscQueueSender<T, H> {
+impl<T, H: Handle, SenderTag> Sink for MpscQueueSender<T, H, SenderTag> where H::HandleInner: HandleInnerBase<ContainerInner=MpscQueueInner<T, SenderTag>> + HandleInner<SenderTag> {
     type SinkItem = T;
     type SinkError = SendError<T>;
 
@@ -285,12 +310,12 @@ impl<T, H: Handle<HandleInner=MpscQueueInner<T>>> Sink for MpscQueueSender<T, H>
     }
 }
 
-impl<T, H: Handle<HandleInner=MpscQueueInner<T>>> Drop for MpscQueueSender<T, H> {
+impl<T, H: Handle, SenderTag> Drop for MpscQueueSender<T, H, SenderTag> where H::HandleInner: HandleInnerBase<ContainerInner=MpscQueueInner<T, SenderTag>> + HandleInner<SenderTag> {
     fn drop(&mut self) {
         // Wake up the receiver
         self.0.with_mut(|inner, id| unsafe { inner.dec_sender_count(id) })
     }
 }
 
-pub type ResizingMpscQueueSender<T> = MpscQueueSender<T, ResizingHandle<MpscQueueInner<T>>>;
-pub type BoundedMpscQueueSender<T> = MpscQueueSender<T, BoundedHandle<MpscQueueInner<T>>>;
+pub type ResizingMpscQueueSender<T> = MpscQueueSender<T, ResizingHandle<Inner<T>>, SenderTag>;
+pub type BoundedMpscQueueSender<T> = MpscQueueSender<T, BoundedHandle<Inner<T>>, SenderTag>;

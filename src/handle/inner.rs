@@ -1,5 +1,7 @@
 use std::marker::PhantomData;
 
+use primitives::invariant::Invariant;
+
 use super::ids::IdAllocator;
 use super::core::Handle;
 
@@ -63,7 +65,7 @@ declare_tags!(Tag0, Tag1, Tag2, Tag3);
 pub struct HandleInner1<Tag0, IdAlloc0, C> {
     container: C,
     id_alloc0: IdAlloc0,
-    phantom: PhantomData<*mut (Tag0,)>,
+    phantom: Invariant<(Tag0,)>,
 }
 
 impl<Tag0, IdAlloc0: IdAllocator<Tag0>, C: ContainerInner<Tag0>> HandleInnerBase for HandleInner1<Tag0, IdAlloc0, C> {
@@ -96,7 +98,7 @@ pub struct HandleInner2<Tag0, IdAlloc0: IdAllocator<Tag0>, Tag1, IdAlloc1: IdAll
     container: C,
     id_alloc0: IdAlloc0,
     id_alloc1: IdAlloc1,
-    phantom: PhantomData<*mut (Tag0, Tag1)>,
+    phantom: Invariant< (Tag0, Tag1)>,
 }
 
 impl<Tag0, IdAlloc0: IdAllocator<Tag0>, Tag1, IdAlloc1: IdAllocator<Tag1>, C: ContainerInner<Tag0> + ContainerInner<Tag1>> HandleInnerBase for HandleInner2<Tag0, IdAlloc0, Tag1, IdAlloc1, C> {
