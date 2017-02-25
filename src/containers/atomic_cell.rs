@@ -60,7 +60,7 @@ impl<T, Tag> AtomicCellInner<T, Tag> {
 #[derive(Debug)]
 pub struct AtomicCell<H: Handle, Tag>(IdHandle<Tag, H>) where H::HandleInner: HandleInner<Tag>;
 
-impl<T, H: Handle, Tag> AtomicCell<H, Tag> where H::HandleInner: HandleInnerBase<ContainerInner=AtomicCellInner<T, Tag>> + HandleInner<Tag> {
+impl<T, H: Handle, Tag> AtomicCell<H, Tag> where H::HandleInner: HandleInner<Tag, ContainerInner=AtomicCellInner<T, Tag>> {
     pub fn new(value: T, max_accessors: usize) -> Self {
         AtomicCell(IdHandle::new(&HandleInnerBase::new(AtomicCellInner::new(value, max_accessors))))
     }

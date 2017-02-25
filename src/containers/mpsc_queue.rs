@@ -227,7 +227,7 @@ pub type BoundedMpscQueueReceiver<T> = MpscQueueReceiver<BoundedHandle<Inner<T>>
 #[derive(Debug)]
 pub struct MpscQueueSender<H: Handle, SenderTag>(IdHandle<SenderTag, H>) where H::HandleInner: HandleInner<SenderTag>;
 
-impl<T, H: Handle, SenderTag> MpscQueueSender<H, SenderTag> where H::HandleInner: HandleInnerBase<ContainerInner=MpscQueueInner<T, SenderTag>> + HandleInner<SenderTag> {
+impl<T, H: Handle, SenderTag> MpscQueueSender<H, SenderTag> where H::HandleInner: HandleInner<SenderTag, ContainerInner=MpscQueueInner<T, SenderTag>> {
     pub fn new(receiver: &MpscQueueReceiver<H>) -> Self {
         MpscQueueSender(IdHandle::new(&receiver.0))
     }

@@ -17,7 +17,7 @@ pub trait HandleInnerBase {
     fn inner(&self) -> &Self::ContainerInner;
 }
 
-pub trait HandleInner<Tag> {
+pub trait HandleInner<Tag>: HandleInnerBase {
     type IdAllocator: IdAllocator<Tag>;
 
     fn id_allocator(&self) -> &Self::IdAllocator;
@@ -118,24 +118,24 @@ impl<Tag0, IdAlloc0: IdAllocator<Tag0>, Tag1, IdAlloc1: IdAllocator<Tag1>, C: Co
     }
 }
 
-impl<Tag0, IdAlloc0: IdAllocator<Tag0>, Tag1, IdAlloc1: IdAllocator<Tag1>, C: ContainerInner<Tag0>> HandleInner<Tag0> for HandleInner2<Tag0, IdAlloc0, Tag1, IdAlloc1, C> where (Tag0, Tag1): Distinct {
+impl<Tag0, IdAlloc0: IdAllocator<Tag0>, Tag1, IdAlloc1: IdAllocator<Tag1>, C: ContainerInner<Tag0> + ContainerInner<Tag1>> HandleInner<Tag0> for HandleInner2<Tag0, IdAlloc0, Tag1, IdAlloc1, C> where (Tag0, Tag1): Distinct {
     type IdAllocator = IdAlloc0;
     fn id_allocator(&self) -> &Self::IdAllocator {
         &self.id_alloc0
     }
     fn raise_id_limit(&mut self, new_limit: usize) {
-        self.container.raise_id_limit(new_limit);
+        ContainerInner::<Tag0>::raise_id_limit(&mut self.container, new_limit);
         self.id_alloc0.raise_id_limit(new_limit);
     }
 }
 
-impl<Tag0, IdAlloc0: IdAllocator<Tag0>, Tag1, IdAlloc1: IdAllocator<Tag1>, C: ContainerInner<Tag1>> HandleInner<Tag1> for HandleInner2<Tag0, IdAlloc0, Tag1, IdAlloc1, C> where (Tag0, Tag1): Distinct {
+impl<Tag0, IdAlloc0: IdAllocator<Tag0>, Tag1, IdAlloc1: IdAllocator<Tag1>, C: ContainerInner<Tag0> + ContainerInner<Tag1>> HandleInner<Tag1> for HandleInner2<Tag0, IdAlloc0, Tag1, IdAlloc1, C> where (Tag0, Tag1): Distinct {
     type IdAllocator = IdAlloc1;
     fn id_allocator(&self) -> &Self::IdAllocator {
         &self.id_alloc1
     }
     fn raise_id_limit(&mut self, new_limit: usize) {
-        self.container.raise_id_limit(new_limit);
+        ContainerInner::<Tag1>::raise_id_limit(&mut self.container, new_limit);
         self.id_alloc1.raise_id_limit(new_limit);
     }
 }

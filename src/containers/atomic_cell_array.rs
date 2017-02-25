@@ -86,7 +86,7 @@ impl<T, Tag> AtomicCellArrayInner<T, Tag> {
 #[derive(Debug)]
 pub struct AtomicCellArray<H: Handle, Tag>(IdHandle<Tag, H>) where H::HandleInner: HandleInner<Tag>;
 
-impl<T, H: Handle, Tag> AtomicCellArray<H, Tag> where H::HandleInner: HandleInnerBase<ContainerInner=AtomicCellArrayInner<T, Tag>> + HandleInner<Tag> {
+impl<T, H: Handle, Tag> AtomicCellArray<H, Tag> where H::HandleInner: HandleInner<Tag, ContainerInner=AtomicCellArrayInner<T, Tag>> {
     pub fn new(max_accessors: usize) -> Self {
         AtomicCellArray(IdHandle::new(&HandleInnerBase::new(AtomicCellArrayInner::new(max_accessors))))
     }

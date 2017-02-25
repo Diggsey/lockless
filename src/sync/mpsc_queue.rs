@@ -273,9 +273,9 @@ pub type ResizingMpscQueueReceiver<T> = MpscQueueReceiver<T, ResizingHandle<Inne
 pub type BoundedMpscQueueReceiver<T> = MpscQueueReceiver<T, BoundedHandle<Inner<T>>, SenderTag>;
 
 #[derive(Debug)]
-pub struct MpscQueueSender<T, H: Handle, SenderTag>(IdHandle<SenderTag, H>) where H::HandleInner: HandleInnerBase<ContainerInner=MpscQueueInner<T, SenderTag>> + HandleInner<SenderTag>;
+pub struct MpscQueueSender<T, H: Handle, SenderTag>(IdHandle<SenderTag, H>) where H::HandleInner: HandleInner<SenderTag, ContainerInner=MpscQueueInner<T, SenderTag>>;
 
-impl<T, H: Handle, SenderTag> MpscQueueSender<T, H, SenderTag> where H::HandleInner: HandleInnerBase<ContainerInner=MpscQueueInner<T, SenderTag>> + HandleInner<SenderTag> {
+impl<T, H: Handle, SenderTag> MpscQueueSender<T, H, SenderTag> where H::HandleInner: HandleInner<SenderTag, ContainerInner=MpscQueueInner<T, SenderTag>> {
     pub fn new(receiver: &MpscQueueReceiver<T, H, SenderTag>) -> Self {
         MpscQueueSender(IdHandle::new(&receiver.0)).inc_sender_count()
     }
@@ -291,13 +291,13 @@ impl<T, H: Handle, SenderTag> MpscQueueSender<T, H, SenderTag> where H::HandleIn
     }
 }
 
-impl<T, H: Handle, SenderTag> Clone for MpscQueueSender<T, H, SenderTag> where H::HandleInner: HandleInnerBase<ContainerInner=MpscQueueInner<T, SenderTag>> + HandleInner<SenderTag> {
+impl<T, H: Handle, SenderTag> Clone for MpscQueueSender<T, H, SenderTag> where H::HandleInner: HandleInner<SenderTag, ContainerInner=MpscQueueInner<T, SenderTag>> {
     fn clone(&self) -> Self {
         MpscQueueSender(self.0.clone()).inc_sender_count()
     }
 }
 
-impl<T, H: Handle, SenderTag> Sink for MpscQueueSender<T, H, SenderTag> where H::HandleInner: HandleInnerBase<ContainerInner=MpscQueueInner<T, SenderTag>> + HandleInner<SenderTag> {
+impl<T, H: Handle, SenderTag> Sink for MpscQueueSender<T, H, SenderTag> where H::HandleInner: HandleInner<SenderTag, ContainerInner=MpscQueueInner<T, SenderTag>> {
     type SinkItem = T;
     type SinkError = SendError<T>;
 
@@ -310,7 +310,7 @@ impl<T, H: Handle, SenderTag> Sink for MpscQueueSender<T, H, SenderTag> where H:
     }
 }
 
-impl<T, H: Handle, SenderTag> Drop for MpscQueueSender<T, H, SenderTag> where H::HandleInner: HandleInnerBase<ContainerInner=MpscQueueInner<T, SenderTag>> + HandleInner<SenderTag> {
+impl<T, H: Handle, SenderTag> Drop for MpscQueueSender<T, H, SenderTag> where H::HandleInner: HandleInner<SenderTag, ContainerInner=MpscQueueInner<T, SenderTag>> {
     fn drop(&mut self) {
         // Wake up the receiver
         self.0.with_mut(|inner, id| unsafe { inner.dec_sender_count(id) })
