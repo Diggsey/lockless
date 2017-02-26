@@ -1,49 +1,35 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::cell::UnsafeCell;
 use std::marker::PhantomData;
 
 use handle::{HandleInner, Handle, IdHandle, ResizingHandle, BoundedHandle, Tag0, HandleInnerBase, ContainerInner, HandleInner1, Id};
 use primitives::index_allocator::IndexAllocator;
 use primitives::invariant::Invariant;
+use containers::id_map::IdMap1;
 
 #[derive(Debug)]
 pub struct AtomicCellArrayInner<T, Tag> {
-    values: Vec<UnsafeCell<Option<T>>>,
-    indices: Vec<UnsafeCell<usize>>,
+    id_map: IdMap1<T, Tag>,
     current: Vec<AtomicUsize>,
     phantom: Invariant<Tag>,
 }
 
-unsafe impl<T: Send, Tag> Sync for AtomicCellArrayInner<T, Tag> {}
-
 impl<T, Tag> ContainerInner<Tag> for AtomicCellArrayInner<T, Tag> {
     fn raise_id_limit(&mut self, new_limit: usize) {
-        assert!(new_limit > self.id_limit());
-
-        let extra_len = new_limit - self.id_limit();
-        self.values.reserve_exact(extra_len);
-        self.indices.reserve_exact(extra_len);
-        for _ in 0..extra_len {
-            self.indices.push(UnsafeCell::new(self.values.len()));
-            self.values.push(UnsafeCell::new(None));
-        }
+        self.id_map.raise_id_limit(new_limit);
     }
     fn id_limit(&self) -> usize {
-        self.indices.len()
+        self.id_map.id_limit()
     }
 }
 
 impl<T, Tag> AtomicCellArrayInner<T, Tag> {
     pub fn reserve_exact(&mut self, additional_cells: usize, additional_ids: usize) {
-        self.values.reserve_exact(additional_cells + additional_ids);
-        self.indices.reserve_exact(additional_ids);
+        self.id_map.reserve(additional_cells, additional_ids);
         self.current.reserve_exact(additional_cells);
     }
 
     fn place(&mut self, value: T) -> AtomicUsize {
-        let id = self.values.len();
-        self.values.push(UnsafeCell::new(Some(value)));
-        AtomicUsize::new(id)
+        AtomicUsize::new(self.id_map.push_value(Some(value)))
     }
 
     pub fn push(&mut self, value: T) {
@@ -58,8 +44,7 @@ impl<T, Tag> AtomicCellArrayInner<T, Tag> {
 
     pub fn with_capacity(capacity: usize, id_limit: usize) -> Self {
         let mut result = AtomicCellArrayInner {
-            values: Vec::new(),
-            indices: Vec::new(),
+            id_map: IdMap1::new(),
             current: Vec::new(),
             phantom: PhantomData
         };
@@ -73,13 +58,9 @@ impl<T, Tag> AtomicCellArrayInner<T, Tag> {
     }
     
     pub unsafe fn swap(&self, index: usize, id: Id<Tag>, value: T) -> T {
-        let id: usize = id.into();
-        // Need the extra brackets to avoid compiler bug:
-        // https://github.com/rust-lang/rust/issues/28935
-        let ref mut idx = *(&self.indices[id]).get();
-        *(&self.values[*idx]).get() = Some(value);
+        let mut idx = self.id_map.store(id, Some(value));
         *idx = self.current[index].swap(*idx, Ordering::AcqRel);
-        (*self.values[*idx].get()).take().expect("Cell should contain a value!")
+        self.id_map.load_at(*idx).expect("Cell should contain a value!")
     }
 }
 

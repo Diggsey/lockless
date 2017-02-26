@@ -1,59 +1,44 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::cell::UnsafeCell;
 use std::marker::PhantomData;
 
 use handle::{ContainerInner, Handle, IdHandle, ResizingHandle, BoundedHandle, HandleInner, HandleInner1, Tag0, HandleInnerBase, Id};
 use primitives::index_allocator::IndexAllocator;
 use primitives::invariant::Invariant;
+use containers::id_map::IdMap1;
 
 #[derive(Debug)]
 pub struct AtomicCellInner<T, Tag> {
-    values: Vec<UnsafeCell<Option<T>>>,
-    indices: Vec<UnsafeCell<usize>>,
+    id_map: IdMap1<T, Tag>,
     current: AtomicUsize,
     phantom: Invariant<Tag>,
 }
 
-unsafe impl<T: Send, Tag> Sync for AtomicCellInner<T, Tag> {}
-
 impl<T, Tag> ContainerInner<Tag> for AtomicCellInner<T, Tag> {
     fn raise_id_limit(&mut self, new_limit: usize) {
-        assert!(new_limit > self.id_limit());
-
-        let mut len = self.values.len();
-        self.values.reserve_exact(new_limit + 1 - len);
-        self.indices.reserve_exact(new_limit - len);
-        while len < new_limit {
-            len += 1;
-            self.values.push(UnsafeCell::new(None));
-            self.indices.push(UnsafeCell::new(len));
-        }
+        self.id_map.raise_id_limit(new_limit);
     }
     fn id_limit(&self) -> usize {
-        self.indices.len()
+        self.id_map.id_limit()
     }
 }
 
 impl<T, Tag> AtomicCellInner<T, Tag> {
-    pub fn new(value: T, max_accessors: usize) -> Self {
-        let mut result = AtomicCellInner {
-            values: Vec::with_capacity(max_accessors+1),
-            indices: Vec::with_capacity(max_accessors),
-            current: AtomicUsize::new(0),
+    pub fn new(value: T, id_limit: usize) -> Self {
+        let mut id_map = IdMap1::new();
+        id_map.reserve(1, id_limit);
+        let current = AtomicUsize::new(id_map.push_value(Some(value)));
+        id_map.raise_id_limit(id_limit);
+
+        AtomicCellInner {
+            id_map: id_map,
+            current: current,
             phantom: PhantomData
-        };
-        result.values.push(UnsafeCell::new(Some(value)));
-        result.raise_id_limit(max_accessors);
-        result
+        }
     }
     pub unsafe fn swap(&self, id: Id<Tag>, value: T) -> T {
-        let id: usize = id.into();
-        // Need the extra brackets to avoid compiler bug:
-        // https://github.com/rust-lang/rust/issues/28935
-        let ref mut index = *(&self.indices[id]).get();
-        *(&self.values[*index]).get() = Some(value);
-        *index = self.current.swap(*index, Ordering::AcqRel);
-        (*self.values[*index].get()).take().expect("Cell should contain a value!")
+        let mut idx = self.id_map.store(id, Some(value));
+        *idx = self.current.swap(*idx, Ordering::AcqRel);
+        self.id_map.load_at(*idx).expect("Cell should contain a value!")
     }
 }
 

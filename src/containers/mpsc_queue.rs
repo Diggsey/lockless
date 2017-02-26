@@ -1,11 +1,11 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::cell::UnsafeCell;
 use std::marker::PhantomData;
 
 use handle::{HandleInner, Handle, IdHandle, ResizingHandle, BoundedHandle, ContainerInner, HandleInnerBase, Tag0, HandleInner1, Id};
 use primitives::atomic_ext::AtomicExt;
 use primitives::index_allocator::IndexAllocator;
 use primitives::invariant::Invariant;
+use containers::id_map::IdMap1;
 
 // Pointers are only wrapped to 2*Capacity to distinguish full from empty states, so must wrap before indexing!
 //  ___________________
@@ -38,11 +38,7 @@ const WRAP_THRESHOLD: usize = !0 ^ (!0 >> 1);
 #[derive(Debug)]
 pub struct MpscQueueInner<T, SenderTag> {
     // All of the actual values are stored here
-    values: Vec<UnsafeCell<Option<T>>>,
-    // Mapping from sender ID to an index into the values array
-    // Each sender owns exactly one "value slot"
-    indices: Vec<UnsafeCell<usize>>,
-    // The remaining "value slots" are owned by the ring buffer
+    id_map: IdMap1<T, SenderTag>,
     // If a value in the buffer has the EMPTY_BIT set, the
     // corresponding "value slot" is empty.
     ring: Vec<AtomicUsize>,
@@ -52,27 +48,13 @@ pub struct MpscQueueInner<T, SenderTag> {
     phantom: Invariant<SenderTag>,
 }
 
-unsafe impl<T: Send, SenderTag> Sync for MpscQueueInner<T, SenderTag> {}
-
 impl<T, SenderTag> ContainerInner<SenderTag> for MpscQueueInner<T, SenderTag> {
     fn raise_id_limit(&mut self, new_limit: usize) {
-        let size = self.ring.len();
-
-        assert!(new_limit > self.id_limit());
-        assert!(new_limit + size <= TAG_BIT, "Queue too large for system's atomic support");
-
-        let mut len = self.indices.len();
-        self.values.reserve_exact(new_limit + size - len);
-        self.indices.reserve_exact(new_limit - len);
-        while len < new_limit {
-            self.values.push(UnsafeCell::new(None));
-            self.indices.push(UnsafeCell::new(size + len));
-            len += 1;
-        }
+        self.id_map.raise_id_limit(new_limit);
     }
 
     fn id_limit(&self) -> usize {
-        self.indices.len()
+        self.id_map.id_limit()
     }
 }
 
@@ -97,21 +79,20 @@ fn rotate_slice<T>(slice: &mut [T], places: usize) {
 }
 
 impl<T, SenderTag> MpscQueueInner<T, SenderTag> {
-    pub fn new(size: usize, max_senders: usize) -> Self {
-        assert!(max_senders > 0);
+    pub fn new(size: usize, id_limit: usize) -> Self {
+        assert!(id_limit > 0);
         let mut result = MpscQueueInner {
-            values: Vec::with_capacity(max_senders+size),
-            indices: Vec::with_capacity(max_senders),
+            id_map: IdMap1::new(),
             ring: Vec::with_capacity(size),
             head: AtomicUsize::new(0),
             tail: AtomicUsize::new(0),
             phantom: PhantomData
         };
-        for i in 0..size {
-            result.values.push(UnsafeCell::new(None));
-            result.ring.push(AtomicUsize::new(i));
+        result.id_map.reserve(size, id_limit);
+        for _ in 0..size {
+            result.ring.push(AtomicUsize::new(result.id_map.push_value(None)));
         }
-        result.raise_id_limit(max_senders);
+        result.raise_id_limit(id_limit);
         result
     }
 
@@ -119,10 +100,9 @@ impl<T, SenderTag> MpscQueueInner<T, SenderTag> {
         let size = self.ring.len();
         let extra = new_size - size;
         self.ring.reserve_exact(extra);
-        self.values.reserve_exact(extra);
+        self.id_map.reserve_values(extra);
         for _ in 0..extra {
-            let index = self.values.len();
-            self.values.push(UnsafeCell::new(None));
+            let index = self.id_map.push_value(None);
             self.ring.push(AtomicUsize::new(index));
         }
 
@@ -142,14 +122,10 @@ impl<T, SenderTag> MpscQueueInner<T, SenderTag> {
     }
 
     pub unsafe fn push(&self, id: Id<SenderTag>, value: T) -> Result<(), T> {
-        let id: usize = id.into();
         let size = self.ring.len();
         let size2 = size*2;
 
-        // Need the extra brackets to avoid compiler bug:
-        // https://github.com/rust-lang/rust/issues/28935
-        let ref mut index = *(&self.indices[id]).get();
-        *(&self.values[*index]).get() = Some(value);
+        let mut index = self.id_map.store(id, Some(value));
 
         loop {
             match self.tail.try_update_indirect(|tail| {
@@ -171,6 +147,7 @@ impl<T, SenderTag> MpscQueueInner<T, SenderTag> {
                     // Cell is full, another thread is midway through an insertion
                     // Try to assist the stalled thread
                     let _ = self.tail.compare_exchange_weak(tail, next_cell(tail, size2), Ordering::SeqCst, Ordering::Relaxed);
+                    // Retry the insertion now that we've helped the other thread to progress
                     Err(true)
                 }
             }) {
@@ -180,7 +157,7 @@ impl<T, SenderTag> MpscQueueInner<T, SenderTag> {
                     *index = prev_cell & VALUE_MASK;
                     return Ok(());
                 }
-                Err(false) => return Err((*(&self.values[*index]).get()).take().expect("Constraint was violated")),
+                Err(false) => return Err(self.id_map.load_at(*index).expect("Constraint was violated")),
                 Err(true) => {},
             }
         }
@@ -198,7 +175,7 @@ impl<T, SenderTag> MpscQueueInner<T, SenderTag> {
         } else {
             let cell = self.ring[head % size].fetch_add(TAG_BIT, Ordering::AcqRel);
             assert!(cell & TAG_BIT != 0, "Producer advanced without adding an item!");
-            let result = (*(&self.values[cell & VALUE_MASK]).get()).take().expect("Constraint was violated");
+            let result = self.id_map.load_at(cell & VALUE_MASK).expect("Constraint was violated");
             self.head.store((head+1) % size2, Ordering::Release);
             Ok(result)
         }
