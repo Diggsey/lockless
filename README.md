@@ -44,6 +44,8 @@ are unbounded.
   abstraction.
 
   Currently, this contains:
+  - `IdMap[N]` - provides storage for values accessed by `Id`, and used as backing storage
+    for the other containers.
   - `AtomicCell` - an alternative to the primitive `AtomicCell` making slightly different
     trade-offs. It is slightly slower (approximately 15% slower in benchmarks), but can be
     composed into other data structures based around the `IdHandle` abstraction.
@@ -53,6 +55,8 @@ are unbounded.
     to be fair, so it's possible for one producer to starve the others. The queue also
     does not provide a mechanism to "wake up" senders/receivers when it's possible to
     continue, and so it must be polled.
+  - `MpmcQueue` - an experimental multiple-producer, multiple-consumer queue. No fairness
+    guarantees, and no wake-up mechanism.
 
 ### `sync`
 
