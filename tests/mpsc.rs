@@ -16,7 +16,7 @@ use lockless::sync::mpsc_queue::{ResizingMpscQueueReceiver, ResizingMpscQueueSen
 fn is_send<T: Send>() {}
 
 fn channel<T>(size: usize) -> (ResizingMpscQueueSender<T>, ResizingMpscQueueReceiver<T>) {
-    let rx = ResizingMpscQueueReceiver::new(size, 8);
+    let rx = ResizingMpscQueueReceiver::new(8, size);
     let tx = ResizingMpscQueueSender::new(&rx);
     (tx, rx)
 }

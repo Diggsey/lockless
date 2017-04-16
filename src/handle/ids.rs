@@ -1,52 +1,55 @@
-use std::marker::PhantomData;
+use std::borrow::{Borrow, BorrowMut};
 
-use primitives::invariant::Invariant;
 use primitives::index_allocator::IndexAllocator;
 
-#[derive(Debug)]
-pub struct Id<Tag>(usize, Invariant<Tag>);
+pub trait Like<T>: Into<T> + From<T> + Borrow<T> + BorrowMut<T> {
+    fn virtual_borrow<R, F: FnOnce(&mut Self) -> R>(value: T, f: F) -> R {
+        let mut v = value.into();
+        let result = f(&mut v);
+        let _: T = v.into();
+        result
+    }
+}
+impl<T, U: Into<T> + From<T> + Borrow<T> + BorrowMut<T>> Like<T> for U {}
 
-impl<Tag> Copy for Id<Tag> {}
-impl<Tag> Clone for Id<Tag> {
-    fn clone(&self) -> Self {
-        *self
+macro_rules! define_id {
+    ($name:ident) => {
+        #[derive(Debug)]
+        pub struct $name(usize);
+
+        impl From<usize> for $name {
+            fn from(value: usize) -> Self { $name(value) }
+        }
+        impl From<$name> for usize {
+            fn from(value: $name) -> Self { value.0 }
+        }
+        impl ::std::borrow::Borrow<usize> for $name {
+            fn borrow(&self) -> &usize { &self.0 }
+        }
+        impl ::std::borrow::BorrowMut<usize> for $name {
+            fn borrow_mut(&mut self) -> &mut usize { &mut self.0 }
+        }
     }
 }
 
-impl<Tag> From<Id<Tag>> for usize {
-    fn from(id: Id<Tag>) -> usize {
-        id.0
-    }
-}
-
-impl<Tag> From<usize> for Id<Tag> {
-    fn from(id: usize) -> Id<Tag> {
-        Id(id, PhantomData)
-    }
-}
-
-pub trait IdAllocator<Tag> {
+pub trait IdAllocator<IdType> {
     fn new(limit: usize) -> Self;
-    fn try_allocate_id(&self) -> Option<Id<Tag>>;
-    fn free_id(&self, id: Id<Tag>);
+    fn try_allocate_id(&self) -> Option<IdType>;
+    fn free_id(&self, id: IdType);
     fn id_limit(&self) -> usize;
-    fn raise_id_limit(&mut self, new_limit: usize);
 }
 
-impl<Tag> IdAllocator<Tag> for IndexAllocator {
+impl<IdType: Like<usize>> IdAllocator<IdType> for IndexAllocator {
     fn new(limit: usize) -> Self {
         IndexAllocator::new(limit)
     }
-    fn try_allocate_id(&self) -> Option<Id<Tag>> {
+    fn try_allocate_id(&self) -> Option<IdType> {
         self.try_allocate().map(Into::into)
     }
-    fn free_id(&self, id: Id<Tag>) {
-        self.free(id.0).into()
+    fn free_id(&self, id: IdType) {
+        self.free(id.into())
     }
     fn id_limit(&self) -> usize {
         self.len()
-    }
-    fn raise_id_limit(&mut self, new_limit: usize) {
-        self.resize(new_limit)
     }
 }

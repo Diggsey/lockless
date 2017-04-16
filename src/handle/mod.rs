@@ -1,4 +1,5 @@
 mod core;
+#[macro_use]
 mod ids;
 mod inner;
 mod resizing;

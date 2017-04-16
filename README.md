@@ -44,8 +44,10 @@ are unbounded.
   abstraction.
 
   Currently, this contains:
-  - `IdMap[N]` - provides storage for values accessed by `Id`, and used as backing storage
-    for the other containers.
+  - `Storage` - provides storage for values larger than a `usize`, for use by other
+    containers.
+  - `Scratch` - provides a scratch space which each accessor can work in before its
+    changes are atomically made visible to other accessors.
   - `AtomicCell` - an alternative to the primitive `AtomicCell` making slightly different
     trade-offs. It is slightly slower (approximately 15% slower in benchmarks), but can be
     composed into other data structures based around the `IdHandle` abstraction.

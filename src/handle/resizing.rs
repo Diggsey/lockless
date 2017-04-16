@@ -1,18 +1,18 @@
 use std::sync::Arc;
 use parking_lot::RwLock;
 
-use super::{HandleInner, HandleInnerBase, Handle, IdHandle, Id, IdAllocator};
+use super::{Handle, IdHandle, IdAllocator, HandleInner};
 
 /// Implementation of Handle which resizes the data structure as needed
 #[derive(Debug)]
-pub struct ResizingHandle<H: HandleInnerBase> {
+pub struct ResizingHandle<H> {
     inner: Arc<RwLock<H>>
 }
 
-unsafe impl<H: HandleInnerBase> Handle for ResizingHandle<H> {
+unsafe impl<H> Handle for ResizingHandle<H> {
     type HandleInner = H;
 
-    fn try_allocate_id<Tag>(&self) -> Option<Id<Tag>> where Self::HandleInner: HandleInner<Tag> {
+    fn try_allocate_id<IdType>(&self) -> Option<IdType> where Self::HandleInner: HandleInner<IdType> {
         let prev_limit = {
             // Optimistically try getting a fresh ID
             let guard = self.inner.read();
@@ -44,12 +44,12 @@ unsafe impl<H: HandleInnerBase> Handle for ResizingHandle<H> {
         }
     }
 
-    fn free_id<Tag>(&self, id: Id<Tag>) where Self::HandleInner: HandleInner<Tag> {
+    fn free_id<IdType>(&self, id: IdType) where Self::HandleInner: HandleInner<IdType> {
         self.inner.read().id_allocator().free_id(id)
     }
 
-    fn with<R, F: FnOnce(&<Self::HandleInner as HandleInnerBase>::ContainerInner) -> R>(&self, f: F) -> R {
-        f(self.inner.read().inner())
+    fn with<R, F: FnOnce(&Self::HandleInner) -> R>(&self, f: F) -> R {
+        f(&self.inner.read())
     }
 
     fn new(inner: Self::HandleInner) -> Self {
@@ -58,12 +58,12 @@ unsafe impl<H: HandleInnerBase> Handle for ResizingHandle<H> {
         }
     }
 
-    fn id_limit<Tag>(&self) -> usize where Self::HandleInner: HandleInner<Tag> {
+    fn id_limit<IdType>(&self) -> usize where Self::HandleInner: HandleInner<IdType> {
         self.inner.read().id_allocator().id_limit()
     }
 }
 
-impl<H: HandleInnerBase> Clone for ResizingHandle<H> {
+impl<H> Clone for ResizingHandle<H> {
     fn clone(&self) -> Self {
         ResizingHandle {
             inner: self.inner.clone()

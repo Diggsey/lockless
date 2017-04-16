@@ -1,11 +1,11 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::marker::PhantomData;
 
-use handle::{HandleInner, Handle, IdHandle, ResizingHandle, BoundedHandle, ContainerInner, HandleInnerBase, Tag0, HandleInner1, Id};
+use handle::{HandleInner, Handle, IdHandle, ResizingHandle, BoundedHandle, Like};
 use primitives::atomic_ext::AtomicExt;
 use primitives::index_allocator::IndexAllocator;
-use primitives::invariant::Invariant;
-use containers::id_map::IdMap1;
+use containers::storage::{Place, Storage};
+use containers::scratch::Scratch;
 
 // Pointers are only wrapped to 2*Capacity to distinguish full from empty states, so must wrap before indexing!
 //  ___________________
@@ -36,26 +36,14 @@ const TAG_BIT: usize = 1 << (::POINTER_BITS - TAG_BITS);
 const WRAP_THRESHOLD: usize = !0 ^ (!0 >> 1);
 
 #[derive(Debug)]
-pub struct MpscQueueInner<T, SenderTag> {
-    // All of the actual values are stored here
-    id_map: IdMap1<T, SenderTag>,
+pub struct MpscQueueInner<T: Like<usize>> {
     // If a value in the buffer has the EMPTY_BIT set, the
     // corresponding "value slot" is empty.
     ring: Vec<AtomicUsize>,
     // Pair of pointers into the ring buffer
     head: AtomicUsize,
     tail: AtomicUsize,
-    phantom: Invariant<SenderTag>,
-}
-
-impl<T, SenderTag> ContainerInner<SenderTag> for MpscQueueInner<T, SenderTag> {
-    fn raise_id_limit(&mut self, new_limit: usize) {
-        self.id_map.raise_id_limit(new_limit);
-    }
-
-    fn id_limit(&self) -> usize {
-        self.id_map.id_limit()
-    }
+    phantom: PhantomData<T>,
 }
 
 fn next_cell(mut index: usize, size2: usize) -> usize {
@@ -78,33 +66,22 @@ fn rotate_slice<T>(slice: &mut [T], places: usize) {
     b.reverse();
 }
 
-impl<T, SenderTag> MpscQueueInner<T, SenderTag> {
-    pub fn new(size: usize, id_limit: usize) -> Self {
-        assert!(id_limit > 0);
-        let mut result = MpscQueueInner {
-            id_map: IdMap1::new(),
-            ring: Vec::with_capacity(size),
+impl<T: Like<usize>> MpscQueueInner<T> {
+    pub fn new<I: IntoIterator<Item=T>>(iter: I) -> Self {
+        MpscQueueInner {
+            ring: iter.into_iter().map(Into::into).map(AtomicUsize::new).collect(),
             head: AtomicUsize::new(0),
             tail: AtomicUsize::new(0),
             phantom: PhantomData
-        };
-        result.id_map.reserve(size, id_limit);
-        for _ in 0..size {
-            result.ring.push(AtomicUsize::new(result.id_map.push_value(None)));
         }
-        result.raise_id_limit(id_limit);
-        result
     }
 
-    pub fn resize(&mut self, new_size: usize) {
+    pub fn extend<I: IntoIterator<Item=T>>(&mut self, iter: I) where I::IntoIter: ExactSizeIterator {
+        let iter = iter.into_iter();
         let size = self.ring.len();
-        let extra = new_size - size;
+        let extra = iter.len();
         self.ring.reserve_exact(extra);
-        self.id_map.reserve_values(extra);
-        for _ in 0..extra {
-            let index = self.id_map.push_value(None);
-            self.ring.push(AtomicUsize::new(index));
-        }
+        self.ring.extend(iter.map(Into::into).map(AtomicUsize::new));
 
         // If the queue wraps around the buffer, shift the elements
         // along such that the start section of the queue is moved to the
@@ -121,11 +98,10 @@ impl<T, SenderTag> MpscQueueInner<T, SenderTag> {
         self.ring.len()
     }
 
-    pub unsafe fn push(&self, id: Id<SenderTag>, value: T) -> Result<(), T> {
+    pub unsafe fn push(&self, value: &mut T) -> bool {
+        let index = value.borrow_mut();
         let size = self.ring.len();
         let size2 = size*2;
-
-        let mut index = self.id_map.store(id, Some(value));
 
         loop {
             match self.tail.try_update_indirect(|tail| {
@@ -155,15 +131,15 @@ impl<T, SenderTag> MpscQueueInner<T, SenderTag> {
                     // Update the tail pointer if necessary
                     while self.tail.compare_exchange_weak(tail, next_cell(tail, size2), Ordering::SeqCst, Ordering::Relaxed) == Err(tail) {}
                     *index = prev_cell & VALUE_MASK;
-                    return Ok(());
+                    return true;
                 }
-                Err(false) => return Err(self.id_map.load_at(*index).expect("Constraint was violated")),
+                Err(false) => return false,
                 Err(true) => {},
             }
         }
     }
 
-    pub unsafe fn pop(&self) -> Result<T, ()> {
+    pub unsafe fn pop<R, F: FnOnce(&mut T) -> R>(&self, receiver: F) -> Result<R, ()> {
         let size = self.ring.len();
         let size2 = size*2;
         let head = self.head.load(Ordering::Relaxed);
@@ -175,19 +151,74 @@ impl<T, SenderTag> MpscQueueInner<T, SenderTag> {
         } else {
             let cell = self.ring[head % size].fetch_add(TAG_BIT, Ordering::AcqRel);
             assert!(cell & TAG_BIT != 0, "Producer advanced without adding an item!");
-            let result = self.id_map.load_at(cell & VALUE_MASK).expect("Constraint was violated");
+            let result = T::virtual_borrow(cell & VALUE_MASK, receiver);
             self.head.store((head+1) % size2, Ordering::Release);
             Ok(result)
         }
     }
 }
 
-#[derive(Debug)]
-pub struct MpscQueueReceiver<H: Handle>(H);
+define_id!(MpscQueueSenderId);
 
-impl<T, H: Handle, Tag> MpscQueueReceiver<H> where H::HandleInner: HandleInnerBase<ContainerInner=MpscQueueInner<T, Tag>> {
-    pub fn new(size: usize, max_senders: usize) -> Self {
-        MpscQueueReceiver(HandleInnerBase::new(MpscQueueInner::new(size, max_senders)))
+pub struct MpscQueueWrapper<T> {
+    storage: Storage<T>,
+    scratch: Scratch<MpscQueueSenderId, Place<T>>,
+    inner: MpscQueueInner<Place<T>>,
+    id_alloc: IndexAllocator
+}
+
+impl<T> MpscQueueWrapper<T> {
+    pub fn new<H: Handle<HandleInner=Self>>(id_limit: usize, size: usize) -> H {
+        assert!(id_limit > 0);
+        let mut storage = Storage::with_capacity(id_limit + size);
+        let scratch = Scratch::new(storage.none_storing_iter(id_limit));
+        let inner = MpscQueueInner::new(storage.none_storing_iter(size));
+        let id_alloc = IndexAllocator::new(id_limit);
+
+        Handle::new(MpscQueueWrapper {
+            storage: storage,
+            scratch: scratch,
+            inner: inner,
+            id_alloc: id_alloc,
+        })
+    }
+
+    pub unsafe fn push(&self, id: &mut MpscQueueSenderId, value: T) -> Result<(), T> {
+        let place = self.scratch.get_mut(id);
+        self.storage.replace(place, Some(value));
+        if self.inner.push(place) {
+            Ok(())
+        } else {
+            Err(self.storage.replace(place, None).expect("Some(value) in container"))
+        }
+    }
+
+    pub unsafe fn pop(&self) -> Result<T, ()> {
+        self.inner.pop(|place| self.storage.replace(place, None).expect("Some(value) in container"))
+    }
+}
+
+impl<T> HandleInner<MpscQueueSenderId> for MpscQueueWrapper<T> {
+    type IdAllocator = IndexAllocator;
+    fn id_allocator(&self) -> &IndexAllocator {
+        &self.id_alloc
+    }
+    fn raise_id_limit(&mut self, new_limit: usize) {
+        let old_limit = self.id_limit();
+        assert!(new_limit > old_limit);
+        let extra = new_limit - old_limit;
+        self.storage.reserve(extra);
+        self.scratch.extend(self.storage.none_storing_iter(extra));
+        self.id_alloc.resize(new_limit);
+    }
+}
+
+#[derive(Debug)]
+pub struct MpscQueueReceiver<T, H: Handle<HandleInner=MpscQueueWrapper<T>>>(H);
+
+impl<T, H: Handle<HandleInner=MpscQueueWrapper<T>>> MpscQueueReceiver<T, H> {
+    pub fn new(max_senders: usize, size: usize) -> Self {
+        MpscQueueReceiver(MpscQueueWrapper::new(max_senders, size))
     }
 
     pub fn receive(&mut self) -> Result<T, ()> {
@@ -196,19 +227,17 @@ impl<T, H: Handle, Tag> MpscQueueReceiver<H> where H::HandleInner: HandleInnerBa
     }
 }
 
-type SenderTag = Tag0;
-type Inner<T> = HandleInner1<SenderTag, IndexAllocator, MpscQueueInner<T, SenderTag>>;
-pub type ResizingMpscQueueReceiver<T> = MpscQueueReceiver<ResizingHandle<Inner<T>>>;
-pub type BoundedMpscQueueReceiver<T> = MpscQueueReceiver<BoundedHandle<Inner<T>>>;
+pub type ResizingMpscQueueReceiver<T> = MpscQueueReceiver<T, ResizingHandle<MpscQueueWrapper<T>>>;
+pub type BoundedMpscQueueReceiver<T> = MpscQueueReceiver<T, BoundedHandle<MpscQueueWrapper<T>>>;
 
 #[derive(Debug)]
-pub struct MpscQueueSender<H: Handle, SenderTag>(IdHandle<SenderTag, H>) where H::HandleInner: HandleInner<SenderTag>;
+pub struct MpscQueueSender<T, H: Handle<HandleInner=MpscQueueWrapper<T>>>(IdHandle<H, MpscQueueSenderId>);
 
-impl<T, H: Handle, SenderTag> MpscQueueSender<H, SenderTag> where H::HandleInner: HandleInner<SenderTag, ContainerInner=MpscQueueInner<T, SenderTag>> {
-    pub fn new(receiver: &MpscQueueReceiver<H>) -> Self {
+impl<T, H: Handle<HandleInner=MpscQueueWrapper<T>>> MpscQueueSender<T, H> {
+    pub fn new(receiver: &MpscQueueReceiver<T, H>) -> Self {
         MpscQueueSender(IdHandle::new(&receiver.0))
     }
-    pub fn try_new(receiver: &MpscQueueReceiver<H>) -> Option<Self> {
+    pub fn try_new(receiver: &MpscQueueReceiver<T, H>) -> Option<Self> {
         IdHandle::try_new(&receiver.0).map(MpscQueueSender)
     }
 
@@ -220,11 +249,11 @@ impl<T, H: Handle, SenderTag> MpscQueueSender<H, SenderTag> where H::HandleInner
     }
 }
 
-impl<H: Handle, SenderTag> Clone for MpscQueueSender<H, SenderTag> where H::HandleInner: HandleInner<SenderTag> {
+impl<T, H: Handle<HandleInner=MpscQueueWrapper<T>>> Clone for MpscQueueSender<T, H> {
     fn clone(&self) -> Self {
         MpscQueueSender(self.0.clone())
     }
 }
 
-pub type ResizingMpscQueueSender<T> = MpscQueueSender<ResizingHandle<Inner<T>>, SenderTag>;
-pub type BoundedMpscQueueSender<T> = MpscQueueSender<BoundedHandle<Inner<T>>, SenderTag>;
+pub type ResizingMpscQueueSender<T> = MpscQueueSender<T, ResizingHandle<MpscQueueWrapper<T>>>;
+pub type BoundedMpscQueueSender<T> = MpscQueueSender<T, BoundedHandle<MpscQueueWrapper<T>>>;

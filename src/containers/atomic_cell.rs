@@ -1,53 +1,78 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::marker::PhantomData;
 
-use handle::{ContainerInner, Handle, IdHandle, ResizingHandle, BoundedHandle, HandleInner, HandleInner1, Tag0, HandleInnerBase, Id};
+use handle::{Handle, IdHandle, ResizingHandle, BoundedHandle, HandleInner, Like};
 use primitives::index_allocator::IndexAllocator;
-use primitives::invariant::Invariant;
-use containers::id_map::IdMap1;
+use containers::storage::{Storage, Place};
+use containers::scratch::Scratch;
 
 #[derive(Debug)]
-pub struct AtomicCellInner<T, Tag> {
-    id_map: IdMap1<T, Tag>,
-    current: AtomicUsize,
-    phantom: Invariant<Tag>,
+pub struct AtomicCellInner<T: Like<usize>>(AtomicUsize, PhantomData<T>);
+
+impl<T: Like<usize>> AtomicCellInner<T> {
+    pub fn new(value: T) -> Self {
+        AtomicCellInner(AtomicUsize::new(value.into()), PhantomData)
+    }
+    pub unsafe fn swap(&self, value: &mut T) {
+        let value = value.borrow_mut();
+        *value = self.0.swap(*value, Ordering::AcqRel);
+    }
 }
 
-impl<T, Tag> ContainerInner<Tag> for AtomicCellInner<T, Tag> {
+define_id!(AtomicCellId);
+
+pub struct AtomicCellWrapper<T> {
+    storage: Storage<T>,
+    scratch: Scratch<AtomicCellId, Place<T>>,
+    inner: AtomicCellInner<Place<T>>,
+    id_alloc: IndexAllocator
+}
+
+impl<T> AtomicCellWrapper<T> {
+    pub fn new<H: Handle<HandleInner=Self>>(id_limit: usize, value: T) -> H {
+        assert!(id_limit > 0);
+        let mut storage = Storage::with_capacity(id_limit + 1);
+        let scratch = Scratch::new(storage.none_storing_iter(id_limit));;
+        let inner = AtomicCellInner::new(storage.store(Some(value)));
+        let id_alloc = IndexAllocator::new(id_limit);
+
+        Handle::new(AtomicCellWrapper {
+            storage: storage,
+            scratch: scratch,
+            inner: inner,
+            id_alloc: id_alloc,
+        })
+    }
+
+    pub unsafe fn swap(&self, id: &mut AtomicCellId, value: T) -> T {
+        let place = self.scratch.get_mut(id);
+        self.storage.replace(place, Some(value));
+        self.inner.swap(place);
+        self.storage.replace(place, None).expect("Some(value) in container")
+    }
+}
+
+impl<T> HandleInner<AtomicCellId> for AtomicCellWrapper<T> {
+    type IdAllocator = IndexAllocator;
+    fn id_allocator(&self) -> &IndexAllocator {
+        &self.id_alloc
+    }
     fn raise_id_limit(&mut self, new_limit: usize) {
-        self.id_map.raise_id_limit(new_limit);
-    }
-    fn id_limit(&self) -> usize {
-        self.id_map.id_limit()
-    }
-}
-
-impl<T, Tag> AtomicCellInner<T, Tag> {
-    pub fn new(value: T, id_limit: usize) -> Self {
-        let mut id_map = IdMap1::new();
-        id_map.reserve(1, id_limit);
-        let current = AtomicUsize::new(id_map.push_value(Some(value)));
-        id_map.raise_id_limit(id_limit);
-
-        AtomicCellInner {
-            id_map: id_map,
-            current: current,
-            phantom: PhantomData
-        }
-    }
-    pub unsafe fn swap(&self, id: Id<Tag>, value: T) -> T {
-        let mut idx = self.id_map.store(id, Some(value));
-        *idx = self.current.swap(*idx, Ordering::AcqRel);
-        self.id_map.load_at(*idx).expect("Cell should contain a value!")
+        let old_limit = self.id_limit();
+        assert!(new_limit > old_limit);
+        let extra = new_limit - old_limit;
+        self.storage.reserve(extra);
+        self.scratch.extend(self.storage.none_storing_iter(extra));
+        self.id_alloc.resize(new_limit);
     }
 }
 
 #[derive(Debug)]
-pub struct AtomicCell<H: Handle, Tag>(IdHandle<Tag, H>) where H::HandleInner: HandleInner<Tag>;
+pub struct AtomicCell<T, H: Handle<HandleInner=AtomicCellWrapper<T>>>(IdHandle<H, AtomicCellId>);
 
-impl<T, H: Handle, Tag> AtomicCell<H, Tag> where H::HandleInner: HandleInner<Tag, ContainerInner=AtomicCellInner<T, Tag>> {
-    pub fn new(value: T, max_accessors: usize) -> Self {
-        AtomicCell(IdHandle::new(&HandleInnerBase::new(AtomicCellInner::new(value, max_accessors))))
+impl<T, H: Handle<HandleInner=AtomicCellWrapper<T>>> AtomicCell<T, H> {
+    pub fn new(max_accessors: usize, value: T) -> Self {
+        AtomicCell(IdHandle::new(&AtomicCellWrapper::new(max_accessors, value)))
     }
 
     pub fn swap(&mut self, value: T) -> T {
@@ -55,12 +80,11 @@ impl<T, H: Handle, Tag> AtomicCell<H, Tag> where H::HandleInner: HandleInner<Tag
     }
 }
 
-impl<H: Handle, Tag> Clone for AtomicCell<H, Tag> where H::HandleInner: HandleInner<Tag> {
+impl<T, H: Handle<HandleInner=AtomicCellWrapper<T>>> Clone for AtomicCell<T, H> {
     fn clone(&self) -> Self {
         AtomicCell(self.0.clone())
     }
 }
 
-type Inner<T> = HandleInner1<Tag0, IndexAllocator, AtomicCellInner<T, Tag0>>;
-pub type ResizingAtomicCell<T> = AtomicCell<ResizingHandle<Inner<T>>, Tag0>;
-pub type BoundedAtomicCell<T> = AtomicCell<BoundedHandle<Inner<T>>, Tag0>;
+pub type ResizingAtomicCell<T> = AtomicCell<T, ResizingHandle<AtomicCellWrapper<T>>>;
+pub type BoundedAtomicCell<T> = AtomicCell<T, BoundedHandle<AtomicCellWrapper<T>>>;
