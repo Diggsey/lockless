@@ -266,16 +266,14 @@ impl<T> MpmcQueueWrapper<T> {
             // Decreasing the message count returns true if a message is ready
             if !self.dec_msg_count_lower(id) {
                 *self.pending_receive_flags.get_mut(id) = 1;
-                return Async::NotReady
+                return Async::NotReady;
             }
         }
+        // A poll has been started, and can be completed immediately
         self.unpark_self(id);
 
         // This may fail if no messages are available
-        match self.pop_inner(id) {
-            Some(value) => Async::Ready(Some(value)),
-            None => Async::Ready(None),
-        }
+        Async::Ready(self.pop_inner(id))
     }
 
     pub unsafe fn close(&self, id: &mut MpmcQueueAccessorId) {
