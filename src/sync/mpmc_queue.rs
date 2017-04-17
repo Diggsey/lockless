@@ -153,22 +153,22 @@ impl<T> MpmcQueueWrapper<T> {
         }
     }
 
-    unsafe fn dec_msg_count_lower(&self, id: &mut MpmcQueueAccessorId) -> Option<bool> {
+    unsafe fn dec_msg_count_lower(&self, id: &mut MpmcQueueAccessorId) -> bool {
         let prev = self.msg_count_lower.fetch_sub(1, Ordering::AcqRel);
         if prev & CLOSE_FLAG != 0 {
             self.msg_count_lower.fetch_add(1, Ordering::AcqRel);
-            Some(true)
+            true
         } else if (prev & MSG_COUNT_MASK) > MSG_COUNT_ZERO {
-            Some(false)
+            true
         } else {
             let mut index = *(*id).borrow();
             while !self.parked_receiver_queue.push(&mut index) {}
             // Make sure queue was not closed
             if self.msg_count_upper.load(Ordering::SeqCst) & CLOSE_FLAG == 0 {
                 // Queue was not closed, park was successful
-                None
+                false
             } else {
-                Some(true)
+                true
             }
         }
     }
@@ -262,28 +262,19 @@ impl<T> MpmcQueueWrapper<T> {
         }
 
         // If a poll hasn't been started yet
-        let finished = if mem::replace(self.pending_receive_flags.get_mut(id), 0) == 0 {
-            // Decreasing the message count returns Some(finished?) if we didn't need to park ourselves
-            match self.dec_msg_count_lower(id) {
-                Some(finished) => {
-                    self.unpark_self(id);
-                    finished
-                },
-                None => false
+        if mem::replace(self.pending_receive_flags.get_mut(id), 0) == 0 {
+            // Decreasing the message count returns true if a message is ready
+            if !self.dec_msg_count_lower(id) {
+                *self.pending_receive_flags.get_mut(id) = 1;
+                return Async::NotReady
             }
-        } else {
-            self.msg_count_lower.load(Ordering::SeqCst) & CLOSE_FLAG != 0
-        };
+        }
+        self.unpark_self(id);
 
         // This may fail if no messages are available
         match self.pop_inner(id) {
             Some(value) => Async::Ready(Some(value)),
-            None if finished => Async::Ready(None),
-            None => {
-                // Poll has been started
-                *self.pending_receive_flags.get_mut(id) = 1;
-                Async::NotReady
-            }
+            None => Async::Ready(None),
         }
     }
 
