@@ -144,11 +144,12 @@ impl<T> MpmcQueueWrapper<T> {
     }
 
     unsafe fn inc_msg_count_lower(&self, id: &mut MpmcQueueAccessorId) {
-        self.msg_count_lower.fetch_add(1, Ordering::AcqRel);
+        let prev = self.msg_count_lower.fetch_add(1, Ordering::AcqRel);
 
         // Wake a receiver if necessary
-        let mut index = 0;
-        if self.parked_receiver_queue.pop(&mut index) {
+        if (prev & CLOSE_FLAG == 0) && (prev & MSG_COUNT_MASK < MSG_COUNT_ZERO) {
+            let mut index = 0;
+            while !self.parked_receiver_queue.pop(&mut index) {}
             self.wake_task(id, index);
         }
     }
@@ -174,11 +175,12 @@ impl<T> MpmcQueueWrapper<T> {
     }
 
     unsafe fn dec_msg_count_upper(&self, id: &mut MpmcQueueAccessorId) {
-        self.msg_count_upper.fetch_sub(1, Ordering::AcqRel);
+        let prev = self.msg_count_upper.fetch_sub(1, Ordering::AcqRel);
 
         // Wake a sender if necessary
         let mut index = 0;
-        if self.parked_sender_queue.pop(&mut index) {
+        if (prev & CLOSE_FLAG == 0) && (prev & MSG_COUNT_MASK > self.buffer_size + MSG_COUNT_ZERO) {
+            while !self.parked_sender_queue.pop(&mut index) {}
             self.wake_task(id, index);
         }
     }
