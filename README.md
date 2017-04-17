@@ -67,6 +67,10 @@ are unbounded.
   Currently, this contains:
   - `MpscQueue` - a multiple-producer, single-consumer queue. This queue is fair,
     so a single producer cannot starve other producers.
+  - `MpmcQueue` - a multiple-producer, multiple-consumer queue. This queue is fair
+    for producers, so a single producer cannot starve other producers, and prior
+    to being closed, it is also fair for receivers. Once closed, any receiver can
+    empty the queue.
 
 
 ## Contributing

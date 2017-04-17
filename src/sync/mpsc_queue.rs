@@ -236,6 +236,7 @@ impl<T> MpscQueueWrapper<T> {
             Err(()) => {
                 // Park ourselves
                 with_receiver_id(|id| self.park_self(id));
+                let finished = self.msg_count.load(Ordering::SeqCst) == CLOSE_FLAG || self.sender_count.load(Ordering::SeqCst) == 0;
                 // Check that queue is still empty
                 match self.pop_inner() {
                     Ok(value) => {
@@ -248,7 +249,7 @@ impl<T> MpscQueueWrapper<T> {
                     Err(()) => {
                         // Queue is still empty, if it's closed and there are no remaining message
                         // then we're done!
-                        if self.msg_count.load(Ordering::SeqCst) == CLOSE_FLAG || self.sender_count.load(Ordering::SeqCst) == 0 {
+                        if finished {
                             Async::Ready(None)
                         } else {
                             Async::NotReady
