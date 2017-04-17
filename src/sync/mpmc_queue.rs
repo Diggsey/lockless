@@ -306,6 +306,10 @@ impl<T> MpmcQueueWrapper<T> {
     }
 
     pub unsafe fn dec_receiver_count(&self, id: &mut MpmcQueueAccessorId) {
+        if mem::replace(self.pending_receive_flags.get_mut(id), 0) == 1 {
+            // Give up our place in the queue to someone else
+            self.inc_msg_count_lower(id);
+        }
         if self.receiver_count.fetch_sub(1, Ordering::AcqRel) == 1 {
             self.close(id);
             self.drain(id);
