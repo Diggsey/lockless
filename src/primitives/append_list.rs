@@ -48,7 +48,7 @@ impl<T> AppendList<T> {
 
     unsafe fn append_ptr(&self, p: *mut Node<T>) {
         loop {
-            match self.0.compare_exchange_weak(ptr::null_mut(), p, Ordering::AcqRel, Ordering::Relaxed) {
+            match self.0.compare_exchange_weak(ptr::null_mut(), p, Ordering::AcqRel, Ordering::Acquire) {
                 Ok(_) => return,
                 Err(head) => if !head.is_null() {
                     return (*head).next.append_ptr(p);
@@ -58,7 +58,7 @@ impl<T> AppendList<T> {
     }
 
     pub fn append_list(&self, other: AppendList<T>) {
-        let p = other.0.load(Ordering::Relaxed);
+        let p = other.0.load(Ordering::Acquire);
         mem::forget(other);
         unsafe { self.append_ptr(p) };
     }
@@ -79,7 +79,7 @@ impl<'a, T> IntoIterator for &'a AppendList<T> {
 
 impl<T> Drop for AppendList<T> {
     fn drop(&mut self) {
-        unsafe { Self::from_raw(self.0.swap(ptr::null_mut(), Ordering::Relaxed)) };
+        unsafe { Self::from_raw(mem::replace(self.0.get_mut(), ptr::null_mut())) };
     }
 }
 
@@ -90,7 +90,7 @@ impl<'a, T: 'a> Iterator for AppendListIterator<'a, T> {
     type Item = &'a T;
 
     fn next(&mut self) -> Option<&'a T> {
-        let p = self.0.load(Ordering::Relaxed);
+        let p = self.0.load(Ordering::Acquire);
         if p.is_null() {
             None
         } else {

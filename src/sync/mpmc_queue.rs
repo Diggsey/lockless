@@ -134,7 +134,7 @@ impl<T> MpmcQueueWrapper<T> {
             let mut index = *(*id).borrow();
             while !self.parked_sender_queue.push(&mut index) {}
             // Make sure queue was not closed
-            if self.msg_count_upper.load(Ordering::SeqCst) & CLOSE_FLAG == 0 {
+            if self.msg_count_upper.load(Ordering::Acquire) & CLOSE_FLAG == 0 {
                 // Queue was not closed, park was successful
                 Ok(true)
             } else {
@@ -165,7 +165,7 @@ impl<T> MpmcQueueWrapper<T> {
             let mut index = *(*id).borrow();
             while !self.parked_receiver_queue.push(&mut index) {}
             // Make sure queue was not closed
-            if self.msg_count_upper.load(Ordering::SeqCst) & CLOSE_FLAG == 0 {
+            if self.msg_count_upper.load(Ordering::Acquire) & CLOSE_FLAG == 0 {
                 // Queue was not closed, park was successful
                 false
             } else {
@@ -280,8 +280,8 @@ impl<T> MpmcQueueWrapper<T> {
 
     pub unsafe fn close(&self, id: &mut MpmcQueueAccessorId) {
         // Mark ourselves as closed
-        self.msg_count_upper.fetch_or(CLOSE_FLAG, Ordering::SeqCst);
-        self.msg_count_lower.fetch_or(CLOSE_FLAG, Ordering::SeqCst);
+        self.msg_count_upper.fetch_or(CLOSE_FLAG, Ordering::AcqRel);
+        self.msg_count_lower.fetch_or(CLOSE_FLAG, Ordering::AcqRel);
 
         // Wake any waiting tasks
         let mut index = 0;

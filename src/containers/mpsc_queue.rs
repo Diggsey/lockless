@@ -7,7 +7,11 @@ use primitives::index_allocator::IndexAllocator;
 use containers::storage::{Place, Storage};
 use containers::scratch::Scratch;
 
-// Pointers are only wrapped to 2*Capacity to distinguish full from empty states, so must wrap before indexing!
+// Pointers are not wrapped until they reach WRAP_THRESHOLD, at
+// which point they are wrapped modulo RING_SIZE*2. This allows
+// accessors to be confident whether the pointers have changed
+// since they were read, preventing the ABA problem, whilst also
+// distinguishing between an empty queue and a full queue:
 //  ___________________
 // |___|_X_|_X_|___|___|
 //       ^       ^
@@ -29,23 +33,32 @@ use containers::scratch::Scratch;
 // where a producer tries to store into a cell which is no longer
 // the tail of the queue, and happens to have the same value index.
 
+// Number of bits in access count
 const TAG_BITS: usize = ::POINTER_BITS/4;
+// Mask to extract the value index
 const VALUE_MASK: usize = !0 >> TAG_BITS;
+// Mask to extract the tag
 const TAG_MASK: usize = !VALUE_MASK;
+// Lowest bit of tag
 const TAG_BIT: usize = 1 << (::POINTER_BITS - TAG_BITS);
+// Threshold at which to wrap the head/tail pointers
 const WRAP_THRESHOLD: usize = !0 ^ (!0 >> 1);
 
+// The raw queue implementation can only store things that
+// look like a `usize`. The values must also be less than
+// or equal to VALUE_MASK, to allow room for the tag bits.
 #[derive(Debug)]
 pub struct MpscQueueInner<T: Like<usize>> {
-    // If a value in the buffer has the EMPTY_BIT set, the
-    // corresponding "value slot" is empty.
+    // Circular buffer storing the values.
     ring: Vec<AtomicUsize>,
     // Pair of pointers into the ring buffer
     head: AtomicUsize,
     tail: AtomicUsize,
+    // Pretend we actually store instances of T
     phantom: PhantomData<T>,
 }
 
+// Advance a pointer by one cell, wrapping if necessary
 fn next_cell(mut index: usize, size2: usize) -> usize {
     index += 1;
     if index >= WRAP_THRESHOLD {
@@ -54,22 +67,42 @@ fn next_cell(mut index: usize, size2: usize) -> usize {
     index
 }
 
+// Determine if we can just add empty elements to the end of the ring-buffer.
+// If the "live section" wraps around, then we can't.
 fn wraps_around(start: usize, end: usize, size: usize) -> bool {
     let size2 = size*2;
+    // If the end is before the start, or they're equal but the queue is full,
+    // then we will need to do some additional shuffling after extending the
+    // queue.
     (end % size) < (start % size) || ((start + size) % size2 == (end % size2))
 }
 
+// In-place rotation algorithm (shifts to the right)
 fn rotate_slice<T>(slice: &mut [T], places: usize) {
+    // Rotation can be implemented by reversing the slice,
+    // splitting the slice in two, and then reversing the
+    // two sub-slices.
     slice.reverse();
     let (a, b) = slice.split_at_mut(places);
     a.reverse();
     b.reverse();
 }
 
+fn validate_value(v: usize) -> usize {
+    assert!(v <= VALUE_MASK, "Value index outside allowed range!");
+    v
+}
+
 impl<T: Like<usize>> MpscQueueInner<T> {
+    // Constructor takes an iterator to "fill" the buffer with an initial set of
+    // values (even empty cells have a value index...)
     pub fn new<I: IntoIterator<Item=T>>(iter: I) -> Self {
         MpscQueueInner {
-            ring: iter.into_iter().map(Into::into).map(AtomicUsize::new).collect(),
+            ring: iter.into_iter()
+                .map(Into::into)
+                .map(validate_value)
+                .map(AtomicUsize::new)
+                .collect(),
             head: AtomicUsize::new(0),
             tail: AtomicUsize::new(0),
             phantom: PhantomData
@@ -79,9 +112,10 @@ impl<T: Like<usize>> MpscQueueInner<T> {
     pub fn extend<I: IntoIterator<Item=T>>(&mut self, iter: I) where I::IntoIter: ExactSizeIterator {
         let iter = iter.into_iter();
         let size = self.ring.len();
+        // Size of the iterator tells us how much the queue is being extended
         let extra = iter.len();
         self.ring.reserve_exact(extra);
-        self.ring.extend(iter.map(Into::into).map(AtomicUsize::new));
+        self.ring.extend(iter.map(Into::into).map(validate_value).map(AtomicUsize::new));
 
         // If the queue wraps around the buffer, shift the elements
         // along such that the start section of the queue is moved to the
@@ -94,18 +128,39 @@ impl<T: Like<usize>> MpscQueueInner<T> {
         }
     }
 
+    // This is the length of the buffer, not the number of "live" elements
     pub fn len(&self) -> usize {
         self.ring.len()
     }
 
+    // Swap a value onto the tail of the queue. If the queue is observed to
+    // be full, there are no side effects and `false` is returned.
     pub unsafe fn push(&self, value: &mut T) -> bool {
         let index = value.borrow_mut();
         let size = self.ring.len();
         let size2 = size*2;
 
+        validate_value(*index);
+
         loop {
+            // Uppdate the cell pointed to by the tail
+            // `try_update_indirect` takes two functions:
+            //
+            // deref
+            //   Takes the tail pointer as input, and returns
+            //   `Ok(&cell_to_update)` or `Err(should_retry)`
+            //
+            // update
+            //   Takes tail pointer, and the cell's previous value,
+            //   and returns `Ok(new_value)` or `Err(should_retry)`
+            //
+            // The function ensures that the tail pointer did not
+            // get updated while the previous value in the cell
+            // was being read.
             match self.tail.try_update_indirect(|tail| {
-                let head = self.head.load(Ordering::SeqCst);
+                // deref
+
+                let head = self.head.load(Ordering::Acquire);
                 // If not full
                 if (tail % size2) != (head + size) % size2 {
                     // Try updating cell at tail position
@@ -115,21 +170,23 @@ impl<T: Like<usize>> MpscQueueInner<T> {
                     Err(false)
                 }
             }, |tail, cell| {
+                // update
+
                 // If cell at tail is empty
                 if cell & TAG_BIT == 0 {
                     // Swap in our index, and mark as full
                     Ok((cell & TAG_MASK).wrapping_add(TAG_BIT) | *index)
                 } else {
                     // Cell is full, another thread is midway through an insertion
-                    // Try to assist the stalled thread
-                    let _ = self.tail.compare_exchange_weak(tail, next_cell(tail, size2), Ordering::SeqCst, Ordering::Relaxed);
+                    // Try to assist the stalled thread, by advancing the tail pointer for them.
+                    let _ = self.tail.compare_exchange(tail, next_cell(tail, size2), Ordering::AcqRel, Ordering::Acquire);
                     // Retry the insertion now that we've helped the other thread to progress
                     Err(true)
                 }
             }) {
                 Ok((tail, prev_cell, _)) => {
                     // Update the tail pointer if necessary
-                    while self.tail.compare_exchange_weak(tail, next_cell(tail, size2), Ordering::SeqCst, Ordering::Relaxed) == Err(tail) {}
+                    let _ = self.tail.compare_exchange(tail, next_cell(tail, size2), Ordering::AcqRel, Ordering::Acquire);
                     *index = prev_cell & VALUE_MASK;
                     return true;
                 }
@@ -142,7 +199,7 @@ impl<T: Like<usize>> MpscQueueInner<T> {
     pub unsafe fn pop<R, F: FnOnce(&mut T) -> R>(&self, receiver: F) -> Result<R, ()> {
         let size = self.ring.len();
         let size2 = size*2;
-        let head = self.head.load(Ordering::Relaxed);
+        let head = self.head.load(Ordering::Acquire);
         let tail = self.tail.load(Ordering::Acquire);
 
         // If the queue is empty

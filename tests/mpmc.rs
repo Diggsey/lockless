@@ -79,6 +79,20 @@ fn send_shared_recv() {
 }
 
 #[test]
+fn send_shared_send() {
+    let (tx, rx1) = channel::<i32>(16);
+    let rx2 = rx1.clone();
+    let mut rx1 = rx1.wait();
+    let mut rx2 = rx2.wait();
+
+    let tx = tx.send(1).wait().unwrap();
+    assert_eq!(rx1.next().unwrap(), Ok(1));
+
+    tx.send(2).wait().unwrap();
+    assert_eq!(rx2.next().unwrap(), Ok(2));
+}
+
+#[test]
 fn send_recv_threads() {
     let (tx, rx) = channel::<i32>(16);
     let mut rx = rx.wait();
@@ -144,17 +158,17 @@ fn stress_shared_bounded_hard() {
     const AMT: u32 = 10000;
     const NTHREADS: u32 = 8;
     let (tx, rx) = channel::<i32>(0);
-    let mut rx = rx.wait();
 
-    let t = thread::spawn(move|| {
-        for _ in 0..AMT * NTHREADS {
-            assert_eq!(rx.next().unwrap(), Ok(1));
-        }
+    let mut ts = Vec::new();
+    for _ in 0..NTHREADS {
+        let mut rx = rx.clone().wait();
 
-        if rx.next().is_some() {
-            panic!();
-        }
-    });
+        ts.push(thread::spawn(move|| {
+            for _ in 0..AMT {
+                assert_eq!(rx.next().unwrap(), Ok(1));
+            }
+        }));
+    }
 
     for _ in 0..NTHREADS {
         let mut tx = tx.clone();
@@ -168,7 +182,13 @@ fn stress_shared_bounded_hard() {
 
     drop(tx);
 
-    t.join().ok().unwrap();
+    for t in ts {
+        t.join().ok().unwrap();
+    }
+
+    if rx.wait().next().is_some() {
+        panic!();
+    }
 }
 
 #[test]

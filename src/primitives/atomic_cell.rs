@@ -33,22 +33,23 @@ impl<T> Inner<T> {
             value: AtomicPtr::new(p)
         }
     }
-    fn unwrap(self) -> T {
-        let p = self.value.load(Ordering::Relaxed);
+    fn unwrap(mut self) -> T {
+        let p = mem::replace(self.value.get_mut(), ptr::null_mut());
         unsafe {
             let result = ptr::read(p);
             free(p);
+            mem::forget(self);
             result
         }
     }
     fn get_mut(&mut self) -> &mut T {
-        unsafe { &mut *self.value.load(Ordering::Relaxed) }
+        unsafe { &mut **self.value.get_mut() }
     }
 }
 
 impl<T> Drop for Inner<T> {
     fn drop(&mut self) {
-        let p = self.value.load(Ordering::Relaxed);
+        let p = mem::replace(self.value.get_mut(), ptr::null_mut());
         unsafe {
             ptr::read(p);
             free(p);
@@ -109,7 +110,7 @@ impl<T> AtomicCell<T> {
             // Store the value into the space we own
             self.space.write(value);
             // Swap our space with the shared space atomically
-            self.space.set(self.inner.value.swap(self.space.get(), Ordering::Relaxed));
+            self.space.set(self.inner.value.swap(self.space.get(), Ordering::AcqRel));
             // Retrieve the value from the returned space
             self.space.read()
         }

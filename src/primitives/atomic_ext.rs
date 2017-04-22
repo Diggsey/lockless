@@ -9,10 +9,10 @@ pub trait AtomicExt {
     type Value: Copy + Eq;
 
     fn try_update<E, F: FnMut(Self::Value) -> Result<Self::Value, E>>(&self, mut f: F) -> Result<(Self::Value, Self::Value), E> {
-        let mut prev = self.load_impl(Ordering::Relaxed);
+        let mut prev = self.load_impl(Ordering::Acquire);
         loop {
             match f(prev) {
-                Ok(next) => match self.compare_exchange_weak_impl(prev, next, Ordering::AcqRel, Ordering::Relaxed) {
+                Ok(next) => match self.compare_exchange_weak_impl(prev, next, Ordering::AcqRel, Ordering::Acquire) {
                     Ok(_) => return Ok((prev, next)),
                     Err(new_prev) => prev = new_prev,
                 },
@@ -30,20 +30,20 @@ pub trait AtomicExt {
         F: FnMut(Self::Value) -> Result<&'a A, E>,
         G: FnMut(Self::Value, A::Value) -> Result<A::Value, E>
     >(&self, mut deref: F, mut update: G) -> Result<(Self::Value, A::Value, A::Value), E> {
-        let mut prev_ptr = self.load_impl(Ordering::SeqCst);
+        let mut prev_ptr = self.load_impl(Ordering::Acquire);
         loop {
             match deref(prev_ptr) {
                 Ok(target) => {
-                    let prev = target.load_impl(Ordering::SeqCst);
-                    let prev_ptr2 = self.load_impl(Ordering::SeqCst);
+                    let prev = target.load_impl(Ordering::Acquire);
+                    let prev_ptr2 = self.load_impl(Ordering::Acquire);
                             
                     if prev_ptr2 == prev_ptr {
                         match update(prev_ptr, prev) {
                             Ok(next) => loop {
-                                match target.compare_exchange_weak_impl(prev, next, Ordering::SeqCst, Ordering::Relaxed) {
+                                match target.compare_exchange_weak_impl(prev, next, Ordering::AcqRel, Ordering::Acquire) {
                                     Ok(_) => return Ok((prev_ptr, prev, next)),
                                     Err(new_prev) => if prev != new_prev {
-                                        prev_ptr = self.load_impl(Ordering::SeqCst);
+                                        prev_ptr = self.load_impl(Ordering::Acquire);
                                         break;
                                     }
                                 }

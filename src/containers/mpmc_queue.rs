@@ -106,7 +106,7 @@ impl<T: Like<usize>> MpmcQueueInner<T> {
 
         loop {
             match self.tail.try_update_indirect(|tail| {
-                let head = self.head.load(Ordering::SeqCst);
+                let head = self.head.load(Ordering::Acquire);
                 // If not full
                 if (tail % size2) != (head + size) % size2 {
                     // Try updating cell at tail position
@@ -123,14 +123,14 @@ impl<T: Like<usize>> MpmcQueueInner<T> {
                 } else {
                     // Cell is full, another thread is midway through an insertion
                     // Try to assist the stalled thread
-                    let _ = self.tail.compare_exchange_weak(tail, next_cell(tail, size2), Ordering::SeqCst, Ordering::Relaxed);
+                    let _ = self.tail.compare_exchange(tail, next_cell(tail, size2), Ordering::AcqRel, Ordering::Acquire);
                     // Retry the insertion now that we've helped the other thread to progress
                     Err(true)
                 }
             }) {
                 Ok((tail, prev_cell, _)) => {
                     // Update the tail pointer if necessary
-                    while self.tail.compare_exchange_weak(tail, next_cell(tail, size2), Ordering::SeqCst, Ordering::Relaxed) == Err(tail) {}
+                    let _ = self.tail.compare_exchange(tail, next_cell(tail, size2), Ordering::AcqRel, Ordering::Acquire);
                     *index = prev_cell & VALUE_MASK;
                     return true;
                 }
@@ -148,7 +148,7 @@ impl<T: Like<usize>> MpmcQueueInner<T> {
 
         loop {
             match self.head.try_update_indirect(|head| {
-                let tail = self.tail.load(Ordering::SeqCst);
+                let tail = self.tail.load(Ordering::Acquire);
                 // If not empty
                 if head % size2 != tail % size2 {
                     // Try updating cell at head position
@@ -165,14 +165,14 @@ impl<T: Like<usize>> MpmcQueueInner<T> {
                 } else {
                     // Cell is empty, another thread is midway through a removal
                     // Try to assist the stalled thread
-                    let _ = self.head.compare_exchange_weak(head, next_cell(head, size2), Ordering::SeqCst, Ordering::Relaxed);
+                    let _ = self.head.compare_exchange(head, next_cell(head, size2), Ordering::AcqRel, Ordering::Acquire);
                     // Retry the insertion now that we've helped the other thread to progress
                     Err(true)
                 }
             }) {
                 Ok((head, prev_cell, _)) => {
                     // Update the tail pointer if necessary
-                    while self.head.compare_exchange_weak(head, next_cell(head, size2), Ordering::SeqCst, Ordering::Relaxed) == Err(head) {}
+                    let _ = self.head.compare_exchange(head, next_cell(head, size2), Ordering::AcqRel, Ordering::Acquire);
                     *index = prev_cell & VALUE_MASK;
                     return true;
                 }

@@ -138,7 +138,7 @@ impl<T> MpscQueueWrapper<T> {
                     while !self.parked_queue.push(&mut index) {}
                     
                     // Make sure queue was not closed
-                    if self.msg_count.load(Ordering::SeqCst) & CLOSE_FLAG == 0 {
+                    if self.msg_count.load(Ordering::Acquire) & CLOSE_FLAG == 0 {
                         // Queue was not closed, park was successful
                         Ok(true)
                     } else {
@@ -154,7 +154,7 @@ impl<T> MpscQueueWrapper<T> {
 
     unsafe fn dec_msg_count(&self) {
         // Decrease the message count
-        self.msg_count.fetch_sub(1, Ordering::SeqCst);
+        self.msg_count.fetch_sub(1, Ordering::AcqRel);
 
         // Wake a task if necessary
         let _ = self.parked_queue.pop(|task_id| {
@@ -236,7 +236,7 @@ impl<T> MpscQueueWrapper<T> {
             Err(()) => {
                 // Park ourselves
                 with_receiver_id(|id| self.park_self(id));
-                let finished = self.msg_count.load(Ordering::SeqCst) == CLOSE_FLAG || self.sender_count.load(Ordering::SeqCst) == 0;
+                let finished = self.msg_count.load(Ordering::Acquire) == CLOSE_FLAG || self.sender_count.load(Ordering::Acquire) == 0;
                 // Check that queue is still empty
                 match self.pop_inner() {
                     Ok(value) => {
@@ -262,7 +262,7 @@ impl<T> MpscQueueWrapper<T> {
 
     pub unsafe fn close(&self) {
         // Mark ourselves as closed
-        self.msg_count.fetch_or(CLOSE_FLAG, Ordering::SeqCst);
+        self.msg_count.fetch_or(CLOSE_FLAG, Ordering::AcqRel);
 
         // Wake any waiting tasks
         while let Ok(task_index) = self.parked_queue.pop(|index| *index) {
