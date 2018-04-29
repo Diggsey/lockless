@@ -1,5 +1,4 @@
-#![feature(test)]
-extern crate test;
+#![cfg_attr(test, feature(test))]
 
 extern crate parking_lot;
 extern crate futures;
@@ -17,8 +16,9 @@ pub mod sync;
 
 #[cfg(test)]
 mod tests {
+    extern crate test;
 
-    use test::Bencher;
+    use self::test::Bencher;
     use std::thread;
     use std::sync::{Mutex, Arc};
 
